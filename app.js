@@ -34,6 +34,7 @@ const ICONS = {
   eye: '<path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.5"/>',
   eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.7A9.9 9.9 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a13.8 13.8 0 0 1-3 3.6M6.4 6.4C4 8 2.5 10.5 2.5 12c0 0 3.5 6.5 9.5 6.5 1.4 0 2.7-.3 3.8-.9"/><path d="M9.9 10a2.5 2.5 0 0 0 3.5 3.5"/>',
   menu: '<path d="M4 6.5h16M4 12h16M4 17.5h16"/>',
+  history: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
 };
 function icon(name, size) {
   size = size || 18;
@@ -49,9 +50,21 @@ function fmtINR(n) {
   const sign = v < 0 ? "\u2212" : "";
   return sign + "\u20B9" + Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 });
 }
-function fmtDateShort(iso) { const d = new Date(iso); return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }); }
+function fmtDateShort(iso) { const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }); }
 function monthKey(iso) { return iso.slice(0, 7); }
-function todayIso() { return new Date().toISOString().slice(0, 10); }
+// Local-time dates (toISOString is UTC, which put entries on the wrong day for IST after midnight)
+function localIso(d) { return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0"); }
+function todayIso() { return localIso(new Date()); }
+function monthKeyOffset(offset) { const n = new Date(); return localIso(new Date(n.getFullYear(), n.getMonth()+offset, 1)).slice(0,7); }
+function monthLong(key) { const [y,m] = key.split("-"); return new Date(Number(y), Number(m)-1, 1).toLocaleDateString("en-GB", { month: "long", year: "numeric" }); }
+// How a transaction moves your cash in hand
+function cashEffect(t) {
+  if (t.type === "income" || t.type === "withdrawal") return t.amount;
+  if (t.type === "expense") return -t.amount;
+  if (t.type === "saving") return t.source === "external" ? 0 : -t.amount;
+  return 0;
+}
+function sortTxns(list) { return [...list].sort((a,b) => b.date.localeCompare(a.date)); }
 function monthLabel(key) { const [y,m] = key.split("-"); return new Date(Number(y), Number(m)-1, 1).toLocaleDateString("en-GB", { month: "short" }); }
 function fyRange(now) {
   now = now || new Date();
@@ -71,7 +84,7 @@ function loadLocalDB() {
 function saveLocalDB() { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 
 let DB = loadLocalDB();
-let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false };
+let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
 let AUTH = { user: null, ready: false, mode: "login", error: "", syncState: "offline" };
 let suppressNextSnapshotEcho = false;
 
@@ -130,6 +143,9 @@ function computeStats() {
   const monthWithdrawn = monthTxns.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
   const monthSaving = monthSavingRaw - monthWithdrawn;
   const monthLeftover = monthIncome - monthExpense - monthSavingFromCash + monthWithdrawn;
+  // Balance brought forward from earlier months, so "Left over" matches cash in hand
+  const openingBalance = txns.filter(t => t.date < thisMonth + "-01").reduce((sum,t) => sum + cashEffect(t), 0);
+  const leftover = openingBalance + monthLeftover;
 
   const byCat = {};
   monthTxns.filter(t=>t.type==="expense").forEach(t=>{ byCat[t.category]=(byCat[t.category]||0)+t.amount; });
@@ -143,35 +159,53 @@ function computeStats() {
   const days = [];
   for (let i=13;i>=0;i--) {
     const d = new Date(); d.setDate(d.getDate()-i);
-    const iso = d.toISOString().slice(0,10);
-    const net = txns.filter(t=>t.date===iso).reduce((s,t)=>s+((t.type==="income"||t.type==="withdrawal")?t.amount:-t.amount),0);
+    const iso = localIso(d);
+    const net = txns.filter(t=>t.date===iso).reduce((s,t)=>s+cashEffect(t),0);
     days.push(net);
   }
   const months = [];
   for (let i=5;i>=0;i--) {
-    const d = new Date(); d.setMonth(d.getMonth()-i);
-    const key = d.toISOString().slice(0,7);
-    const mt = txns.filter(t=>monthKey(t.date)===key);
-    const inc = mt.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
-    const exp = mt.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
-    const savFromCash = mt.filter(t=>t.type==="saving" && t.source!=="external").reduce((s,t)=>s+t.amount,0);
-    const wd = mt.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
-    months.push({ key, leftover: inc-exp-savFromCash+wd });
+    const key = monthKeyOffset(-i);
+    // month-end balance = everything up to and including that month
+    const closing = txns.filter(t=>monthKey(t.date)<=key).reduce((s,t)=>s+cashEffect(t),0);
+    months.push({ key, leftover: closing });
   }
   const fy = fyRange();
   const tax80cIn = txns.filter(t=>t.type==="saving" && (t.category==="PPF"||t.category==="ELSS") && inRange(t.date, fy)).reduce((s,t)=>s+t.amount,0);
   const tax80cOut = txns.filter(t=>t.type==="withdrawal" && (t.category==="PPF"||t.category==="ELSS") && inRange(t.date, fy)).reduce((s,t)=>s+t.amount,0);
   const tax80c = Math.max(0, tax80cIn - tax80cOut);
 
-  const lmd = new Date(); lmd.setMonth(lmd.getMonth()-1);
-  const lastMonthKey = lmd.toISOString().slice(0,7);
+  const lastMonthKey = monthKeyOffset(-1);
   const lastMonthTxns = txns.filter(t=>monthKey(t.date)===lastMonthKey);
   const lastMonthExpense = lastMonthTxns.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
   const lastMonthSaving = lastMonthTxns.filter(t=>t.type==="saving").reduce((s,t)=>s+t.amount,0) - lastMonthTxns.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
   const expenseDelta = lastMonthExpense>0 ? Math.round(((monthExpense-lastMonthExpense)/lastMonthExpense)*100) : null;
   const savingDelta = lastMonthSaving>0 ? Math.round(((monthSaving-lastMonthSaving)/lastMonthSaving)*100) : null;
 
-  return { thisMonth, cashInHand, monthIncome, monthExpense, monthSaving, monthLeftover, byCat, sportsSaved, totalSaving, totalSavingFromCash, totalSavingExternal, totalWithdrawn, totalIncome, days, months, tax80c, fy, expenseDelta, savingDelta };
+  return { thisMonth, cashInHand, openingBalance, leftover, monthWithdrawn, monthSavingFromCash, monthIncome, monthExpense, monthSaving, monthLeftover, byCat, sportsSaved, totalSaving, totalSavingFromCash, totalSavingExternal, totalWithdrawn, totalIncome, days, months, tax80c, fy, expenseDelta, savingDelta };
+}
+
+// Month-by-month ledger: opening balance, movements, closing balance
+function buildLedger() {
+  const txns = DB.txns;
+  const keys = new Set(txns.map(t => monthKey(t.date)));
+  keys.add(todayIso().slice(0,7));
+  const sorted = [...keys].sort();
+  let running = 0, prevKey = null;
+  const out = [];
+  sorted.forEach(key => {
+    const mt = txns.filter(t => monthKey(t.date) === key);
+    const income = mt.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
+    const expense = mt.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+    const saved = mt.filter(t=>t.type==="saving" && t.source!=="external").reduce((s,t)=>s+t.amount,0);
+    const withdrawn = mt.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
+    const opening = running;
+    const closing = opening + income - expense - saved + withdrawn;
+    running = closing;
+    out.push({ key, prevKey, opening, closing, income, expense, saved, withdrawn, txns: sortTxns(mt) });
+    prevKey = key;
+  });
+  return out.reverse(); // newest first
 }
 
 function dueRecurring(thisMonth) {
@@ -231,11 +265,12 @@ function metricCard(label, value, opts) {
     const arrow = opts.delta === 0 ? "Same as" : (opts.delta > 0 ? `\u2191 ${Math.abs(opts.delta)}% vs` : `\u2193 ${Math.abs(opts.delta)}% vs`);
     deltaHtml = `<p style="font-size:10.5px;margin:3px 0 0;color:${color}">${arrow} last month</p>`;
   }
+  const noteHtml = opts.note ? `<p style="font-size:10.5px;margin:3px 0 0;color:var(--ink-soft)">${esc(opts.note)}</p>` : "";
   const color = opts.highlight && value < 0 ? "var(--danger)" : "var(--ink)";
   return `<div class="metric">
     <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 5px">${esc(label)}</p>
     <p class="num" style="font-size:18px;font-weight:700;margin:0;color:${color}">${fmtINR(value)}</p>
-    ${deltaHtml}
+    ${deltaHtml}${noteHtml}
   </div>`;
 }
 function txnRow(t, editable) {
@@ -260,7 +295,7 @@ function sectionLabel(text, iconName) {
 
 /* ==================== tab views ==================== */
 function viewHome(stats) {
-  const recent = DB.txns.slice(0,5);
+  const recent = sortTxns(DB.txns).slice(0,5);
   const topCats = Object.entries(stats.byCat).sort((a,b)=>b[1]-a[1]).slice(0,4);
   const maxCat = topCats.length ? topCats[0][1] : 1;
   const due = dueRecurring(stats.thisMonth);
@@ -287,10 +322,12 @@ function viewHome(stats) {
     ${metricCard("Income this month", stats.monthIncome)}
     ${metricCard("Spent this month", stats.monthExpense, { delta: stats.expenseDelta, deltaGood: "down" })}
     ${metricCard("Saved this month", stats.monthSaving, { delta: stats.savingDelta, deltaGood: "up" })}
-    ${metricCard("Left over", stats.monthLeftover, { highlight: true })}
+    ${metricCard("Left over", stats.leftover, { highlight: true, note: stats.openingBalance !== 0 ? `Incl. ${fmtINR(stats.openingBalance)} brought forward` : "" })}
   </div>`;
 
-  html += `<div class="card">${sectionLabel("6-month trend \u00b7 left over per month")}${trendChart(stats.months)}</div>`;
+  html += reconcileCard(stats);
+
+  html += `<div class="card">${sectionLabel("6-month trend \u00b7 month-end balance")}${trendChart(stats.months)}</div>`;
 
   if (topCats.length) {
     html += `<div class="card">${sectionLabel("Top spending this month")}<div style="display:flex;flex-direction:column;gap:11px">`;
@@ -313,14 +350,44 @@ function viewHome(stats) {
   html += `<div class="card">${sectionLabel("Recent activity")}`;
   if (!recent.length) html += `<p class="muted">Nothing logged yet — use the buttons above to add your first entry.</p>`;
   else recent.forEach(t => html += txnRow(t, true));
+  html += `<button class="btn-ghost" style="width:100%;margin-top:10px;padding:9px;font-size:12.5px" onclick="setTab('history')">View full history</button>`;
   html += `</div>`;
 
   return html;
 }
 
+// Shows exactly how "Left over" is built, including last month's balance
+function reconcileCard(stats) {
+  const row = (label, val, sign, color) => `<div style="display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0"><span style="color:var(--ink-soft)">${esc(label)}</span><span class="num" style="font-weight:700;color:${color||'var(--ink)'}">${sign}${fmtINR(Math.abs(val))}</span></div>`;
+  const prev = monthLabel(monthKeyOffset(-1));
+  let h = `<div class="card">${sectionLabel("This month, line by line")}`;
+  if (stats.openingBalance !== 0) {
+    h += stats.openingBalance < 0
+      ? row(`Last month's shortfall (${prev}) cleared`, stats.openingBalance, "\u2212", "var(--danger)")
+      : row(`Brought forward from ${prev}`, stats.openingBalance, "+", "var(--saving)");
+  }
+  h += row("Income", stats.monthIncome, "+", "var(--income)");
+  h += row("Spent", stats.monthExpense, "\u2212", "var(--expense)");
+  if (stats.monthSavingFromCash) h += row("Moved to savings", stats.monthSavingFromCash, "\u2212", "var(--saving)");
+  if (stats.monthWithdrawn) h += row("Withdrawn from savings", stats.monthWithdrawn, "+", "var(--withdraw)");
+  h += `<div style="display:flex;justify-content:space-between;padding-top:9px;margin-top:6px;border-top:1px solid var(--line);font-size:13px;font-weight:700"><span>Left over</span><span class="num" style="color:${stats.leftover<0?'var(--danger)':'var(--ink)'}">${fmtINR(stats.leftover)}</span></div></div>`;
+  return h;
+}
+
+function addPageButton(type, label) {
+  const meta = TYPE_META[type];
+  return `<button class="btn-primary" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px;background:${meta.color}" onclick="openForm('${type}')">${icon('plus',15)} ${esc(label)}</button>`;
+}
+function scopeChips() {
+  const on = (k) => UI.listScope === k ? "on" : "";
+  return `<div class="chips"><button class="chip ${on('month')}" onclick="setListScope('month')">This month</button><button class="chip ${on('all')}" onclick="setListScope('all')">All time</button></div>`;
+}
+function inScope(t) { return UI.listScope === "all" || monthKey(t.date) === todayIso().slice(0,7); }
+
 function viewIncome(stats) {
   const already = DB.txns.some(t=>t.type==="income"&&t.category==="Salary"&&monthKey(t.date)===stats.thisMonth);
-  let html = `<div class="card">${sectionLabel("Monthly salary")}
+  let html = addPageButton("income", "Add income");
+  html += `<div class="card">${sectionLabel("Monthly salary")}
     <div style="display:flex;gap:8px;align-items:flex-end">
       <div style="flex:1"><label class="fl">Amount (\u20B9)</label><input id="salaryInput" type="number" min="0" step="1000" placeholder="0" value="${DB.goals.monthlySalary||''}"/></div>
       <button class="btn-ghost" style="height:40px;padding:0 16px" onclick="saveSalary()">Save</button>
@@ -328,28 +395,65 @@ function viewIncome(stats) {
     <div style="margin-top:10px"><button class="btn-primary" ${already?'disabled':''} onclick="logSalaryThisMonth()">${already?"Salary already logged this month":"Log this month's salary"}</button></div>
   </div>
   <div class="card">${sectionLabel("Got money another way?")}
-    <p class="muted" style="margin:0 0 12px">Gift from family, cash you found, a refund — anything that lands in your hand outside your usual salary. Log it as income with the "Gift" category to keep it separate from your regular earnings.</p>
-    <button class="btn-ghost" style="width:100%" onclick="openForm('income')">${icon('plus',14)} Add money received</button>
+    <p class="muted" style="margin:0">Gift from family, cash you found, a refund \u2014 pick the "Gift" category when adding income to keep it separate from your regular earnings.</p>
   </div>`;
-  const incomeTxns = DB.txns.filter(t=>t.type==="income");
+  html += scopeChips();
+  const incomeTxns = sortTxns(DB.txns.filter(t=>t.type==="income" && inScope(t)));
   html += `<div class="card">`;
-  if (!incomeTxns.length) html += `<p class="muted">No income logged yet.</p>`;
+  if (!incomeTxns.length) html += `<p class="muted">${UI.listScope==="all" ? "No income logged yet." : "No income logged this month yet."}</p>`;
   else incomeTxns.forEach(t => html += txnRow(t, true));
   html += `</div>`;
   return html;
 }
 
 function viewList(type, emptyText) {
-  const list = type === "saving" ? DB.txns.filter(t=>t.type==="saving"||t.type==="withdrawal") : DB.txns.filter(t=>t.type===type);
-  let html = "";
+  const base = type === "saving" ? DB.txns.filter(t=>t.type==="saving"||t.type==="withdrawal") : DB.txns.filter(t=>t.type===type);
+  const list = sortTxns(base.filter(inScope));
+  let html = addPageButton(type, type === "saving" ? "Add saving" : "Add expense");
   if (type === "saving") {
     html += savingsBreakdown();
     html += `<button class="btn-withdraw" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px" onclick="openWithdraw()">${icon('download',15)} Withdraw from savings to cash</button>`;
   }
+  html += scopeChips();
   html += `<div class="card">`;
-  if (!list.length) html += `<p class="muted">${esc(emptyText)}</p>`;
+  if (!list.length) html += `<p class="muted">${UI.listScope==="all" ? esc(emptyText) : "Nothing logged this month yet."}</p>`;
   else list.forEach(t => html += txnRow(t, true));
   html += `</div>`;
+  return html;
+}
+
+// History: month-by-month log, each month ends with the balance brought forward
+function viewHistory() {
+  const ledger = buildLedger();
+  const f = UI.histFilter;
+  const chip = (k, label) => `<button class="chip ${f===k?'on':''}" onclick="setHistFilter('${k}')">${label}</button>`;
+  let html = `<div class="chips">${chip('all','All')}${chip('income','Income')}${chip('expense','Spend')}${chip('saving','Savings')}</div>`;
+  const match = (t) => f==="all" || (f==="saving" ? (t.type==="saving"||t.type==="withdrawal") : t.type===f);
+  ledger.forEach(m => {
+    const rows = m.txns.filter(match);
+    html += `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+        <p style="font-size:14px;font-weight:700;margin:0">${esc(monthLong(m.key))}</p>
+        <p style="font-size:11px;color:var(--ink-soft);margin:0">Closing <span class="num" style="font-weight:700;color:${m.closing<0?'var(--danger)':'var(--ink)'}">${fmtINR(m.closing)}</span></p>
+      </div>
+      <p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">In ${fmtINR(m.income + m.withdrawn)} \u00b7 Out ${fmtINR(m.expense + m.saved)}</p>`;
+    if (!rows.length) html += `<p class="muted" style="margin:6px 0">Nothing logged.</p>`;
+    rows.forEach(t => html += txnRow(t, true));
+    if (f === "all" && m.opening !== 0 && m.prevKey) {
+      const neg = m.opening < 0;
+      html += `<div class="row" style="cursor:default;background:var(--brass-tint);margin:6px -8px 0;padding:11px 8px;border-radius:10px;border-bottom:none;width:auto">
+        <div style="display:flex;align-items:center;gap:11px;min-width:0;flex:1">
+          <span class="icon-badge" style="background:var(--card);color:var(--brass)">${icon('repeat',15)}</span>
+          <div style="min-width:0;text-align:left">
+            <p style="font-size:13.5px;margin:0;color:var(--ink)">${neg ? "Previous balance cleared" : "Balance brought forward"}</p>
+            <p style="font-size:11.5px;color:var(--ink-soft);margin:0">From ${esc(monthLabel(m.prevKey))}${neg ? " \u00b7 shortfall adjusted against this month" : ""}</p>
+          </div>
+        </div>
+        <span class="num" style="font-size:13.5px;font-weight:700;color:${neg?'var(--danger)':'var(--saving)'};flex-shrink:0">${neg?"":"+"}${fmtINR(m.opening)}</span>
+      </div>`;
+    }
+    html += `</div>`;
+  });
   return html;
 }
 
@@ -658,6 +762,7 @@ function render() {
     ["income","income","Income"],
     ["expenses","expense","Spend"],
     ["savings","savings","Savings"],
+    ["history","history","History"],
     ["goals","goals","Goals"],
     ["about","about","About"],
   ];
@@ -666,10 +771,11 @@ function render() {
   else if (UI.tab==="income") body = viewIncome(stats);
   else if (UI.tab==="expenses") body = viewList("expense","No expenses logged yet.");
   else if (UI.tab==="savings") body = viewList("saving","No savings or investments logged yet.");
+  else if (UI.tab==="history") body = viewHistory();
   else if (UI.tab==="goals") body = viewGoals(stats);
   else if (UI.tab==="about") body = viewAbout();
 
-  const navHtml = tabs.map(([k,ic,label]) => `<button class="navitem ${UI.tab===k?'active':''}" onclick="setTab('${k}')">${icon(ic,17)}<span>${label}</span><span class="dot"></span></button>`).join("");
+  const navHtml = tabs.filter(t => t[0] !== "about").map(([k,ic,label]) => `<button class="navitem ${UI.tab===k?'active':''}" onclick="setTab('${k}')">${icon(ic,17)}<span>${label}</span><span class="dot"></span></button>`).join("");
   const sidebarHtml = tabs.map(([k,ic,label]) => `<button class="sidebar-item ${UI.tab===k?'active':''}" onclick="setTab('${k}')">${icon(ic,18)}<span>${label}</span></button>`).join("");
   const drawerNavHtml = tabs.map(([k,ic,label]) => `<button class="sidebar-item ${UI.tab===k?'active':''}" onclick="setTab('${k}'); closeMobileMenu();">${icon(ic,18)}<span>${label}</span></button>`).join("");
 
@@ -788,7 +894,9 @@ function setupSwipeGestures() {
     startX = null; startY = null;
   }, { passive: true });
 }
-function setTab(t) { UI.tab = t; render(); }
+function setTab(t) { UI.tab = t; render(); window.scrollTo(0, 0); }
+function setListScope(k) { UI.listScope = k; render(); }
+function setHistFilter(k) { UI.histFilter = k; render(); }
 function openForm(type) { UI.formType = type; UI.editingId = null; UI.formSource = "income"; UI.showForm = true; render(); }
 function openEdit(id) {
   const t = DB.txns.find(x=>x.id===id);
@@ -839,7 +947,7 @@ function submitSheet() {
   UI.showForm = false; UI.editingId = null;
   render();
 }
-function doDeleteTxn() { if (UI.editingId) deleteTxn(UI.editingId); UI.showForm=false; UI.editingId=null; render(); }
+function doDeleteTxn() { if (!confirm("Delete this entry? This can't be undone.")) return; if (UI.editingId) deleteTxn(UI.editingId); UI.showForm=false; UI.editingId=null; render(); }
 
 function openWithdraw() { UI.showWithdraw = true; render(); }
 function closeWithdraw() { UI.showWithdraw = false; render(); }
@@ -882,7 +990,7 @@ function saveGoalsForm() {
 }
 
 function doLogRecurring(id) { const stats = computeStats(); logRecurring(id, stats.thisMonth); render(); }
-function doDeleteRecurring(id) { deleteRecurring(id); render(); }
+function doDeleteRecurring(id) { if (!confirm("Remove this recurring item?")) return; deleteRecurring(id); render(); }
 function openRecurringForm() { UI.recurringOpen = true; UI.recFormType = "expense"; UI.recSource = "income"; render(); }
 function closeRecurringForm() { UI.recurringOpen = false; render(); }
 function setRecFormType(t) { UI.recFormType = t; render(); }
