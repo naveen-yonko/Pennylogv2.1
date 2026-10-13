@@ -1,6 +1,8 @@
 /* ==================== constants ==================== */
 const CATS_EXPENSE = ["Food","Transport","Rent","Utilities","Shopping","Health","Entertainment","Other"];
-const CATS_SAVING = ["SIP / Index fund","PPF","ELSS","Emergency fund","Sports fund (Hyrox/IRONMAN)","Other"];
+const CATS_SAVING_BASE = ["SIP / Index fund","PPF","ELSS","Emergency fund"];
+const LEGACY_SPORTS = "Sports fund (Hyrox/IRONMAN)"; // old hardcoded goal, migrated into a customizable goal
+const CLEARANCE_CATEGORY = "Previous balance";
 const CATS_INCOME = ["Salary","Freelance","Bonus","Interest","Gift","Other"];
 const TAX_80C_LIMIT = 150000;
 const GITHUB_REPO = "https://github.com/naveen-yonko/PennyLog";
@@ -41,7 +43,15 @@ function icon(name, size) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
 }
 function catIcon(type) { return (type === "income" || type === "withdrawal") ? "income" : type === "saving" ? "sprout" : "expense"; }
-function catsFor(type) { return type === "income" ? CATS_INCOME : type === "saving" ? CATS_SAVING : CATS_EXPENSE; }
+// Savings categories = built-ins + your own goals + any older category still used by past entries
+function savingCategories() {
+  const names = [...CATS_SAVING_BASE];
+  (DB.goals.custom || []).forEach(g => { if (!names.includes(g.name)) names.push(g.name); });
+  DB.txns.forEach(t => { if ((t.type==="saving"||t.type==="withdrawal") && t.category && t.category!=="Other" && !names.includes(t.category)) names.push(t.category); });
+  names.push("Other");
+  return names;
+}
+function catsFor(type) { return type === "income" ? CATS_INCOME : type === "saving" ? savingCategories() : CATS_EXPENSE; }
 
 /* ==================== helpers ==================== */
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
@@ -76,15 +86,31 @@ function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
 
 /* ==================== storage ==================== */
 const STORE_KEY = "pennylog-db-v1";
-function emptyDB() { return { txns: [], goals: { monthlyBudgets: {}, sportsTarget: 0, monthlySalary: 0 }, recurring: [] }; }
+function emptyDB() { return { txns: [], goals: { monthlyBudgets: {}, sportsTarget: 0, monthlySalary: 0, custom: [] }, recurring: [] }; }
+// Fills in missing fields and moves the old hardcoded sports fund into a normal, editable goal (once)
+function normalizeDB(d) {
+  d = d || emptyDB();
+  d.txns = d.txns || [];
+  d.recurring = d.recurring || [];
+  d.goals = Object.assign({ monthlyBudgets: {}, sportsTarget: 0, monthlySalary: 0 }, d.goals || {});
+  if (!Array.isArray(d.goals.custom)) d.goals.custom = [];
+  if (!d.goals.migratedV3) {
+    const used = d.txns.some(t => t.category === LEGACY_SPORTS);
+    if ((d.goals.sportsTarget > 0 || used) && !d.goals.custom.some(g => g.name === LEGACY_SPORTS)) {
+      d.goals.custom.push({ id: uid(), name: LEGACY_SPORTS, target: d.goals.sportsTarget || 0, date: "" });
+    }
+    d.goals.migratedV3 = true;
+  }
+  return d;
+}
 function loadLocalDB() {
   try { const raw = localStorage.getItem(STORE_KEY); if (raw) return JSON.parse(raw); } catch (e) {}
   return emptyDB();
 }
 function saveLocalDB() { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 
-let DB = loadLocalDB();
-let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
+let DB = normalizeDB(loadLocalDB());
+let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
 let AUTH = { user: null, ready: false, mode: "login", error: "", syncState: "offline" };
 let suppressNextSnapshotEcho = false;
 
@@ -109,7 +135,7 @@ window.onAuthChange = function (user) {
       if (suppressNextSnapshotEcho) { suppressNextSnapshotEcho = false; AUTH.syncState = "synced"; render(); return; }
       if (snap.exists()) {
         const data = snap.data();
-        DB = { txns: data.txns || [], goals: data.goals || emptyDB().goals, recurring: data.recurring || [] };
+        DB = normalizeDB({ txns: data.txns || [], goals: data.goals || emptyDB().goals, recurring: data.recurring || [] });
         saveLocalDB();
       } else {
         window.__fb.setDoc(doc(dbFs, "pennylog", user.uid), DB);
@@ -137,24 +163,29 @@ function computeStats() {
 
   const monthTxns = txns.filter(t=>monthKey(t.date)===thisMonth);
   const monthIncome = monthTxns.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
-  const monthExpense = monthTxns.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+  const ledger = buildLedger();
+  const curM = ledger.find(m => m.key === thisMonth) || { carry: 0, clearance: 0, opening: 0 };
+  const monthExpenseReal = monthTxns.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+  const monthClearance = curM.clearance;
+  const monthExpense = monthExpenseReal + monthClearance; // what you "spent" this month, shortfall included
   const monthSavingRaw = monthTxns.filter(t=>t.type==="saving").reduce((s,t)=>s+t.amount,0);
   const monthSavingFromCash = monthTxns.filter(t=>t.type==="saving" && t.source!=="external").reduce((s,t)=>s+t.amount,0);
   const monthWithdrawn = monthTxns.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
   const monthSaving = monthSavingRaw - monthWithdrawn;
+  // Left over = carried-forward surplus + income - spent (incl. shortfall cleared) - saved + withdrawn
+  const openingBalance = curM.opening;
   const monthLeftover = monthIncome - monthExpense - monthSavingFromCash + monthWithdrawn;
-  // Balance brought forward from earlier months, so "Left over" matches cash in hand
-  const openingBalance = txns.filter(t => t.date < thisMonth + "-01").reduce((sum,t) => sum + cashEffect(t), 0);
-  const leftover = openingBalance + monthLeftover;
+  const leftover = curM.carry + monthLeftover;
 
   const byCat = {};
   monthTxns.filter(t=>t.type==="expense").forEach(t=>{ byCat[t.category]=(byCat[t.category]||0)+t.amount; });
+  if (monthClearance > 0) byCat[CLEARANCE_CATEGORY] = monthClearance;
 
   // net saved per category (all-time inflow minus withdrawals from that category)
   const netByCategory = {};
   txns.filter(t=>t.type==="saving").forEach(t=>{ netByCategory[t.category] = (netByCategory[t.category]||0) + t.amount; });
   txns.filter(t=>t.type==="withdrawal").forEach(t=>{ netByCategory[t.category] = (netByCategory[t.category]||0) - t.amount; });
-  const sportsSaved = netByCategory["Sports fund (Hyrox/IRONMAN)"] || 0;
+  const goalProgress = (DB.goals.custom || []).map(g => ({ ...g, saved: netByCategory[g.name] || 0 }));
 
   const days = [];
   for (let i=13;i>=0;i--) {
@@ -177,13 +208,22 @@ function computeStats() {
 
   const lastMonthKey = monthKeyOffset(-1);
   const lastMonthTxns = txns.filter(t=>monthKey(t.date)===lastMonthKey);
-  const lastMonthExpense = lastMonthTxns.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+  const lastM = ledger.find(m => m.key === lastMonthKey);
+  const lastMonthExpense = lastM ? lastM.spent : 0;
   const lastMonthSaving = lastMonthTxns.filter(t=>t.type==="saving").reduce((s,t)=>s+t.amount,0) - lastMonthTxns.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
   const expenseDelta = lastMonthExpense>0 ? Math.round(((monthExpense-lastMonthExpense)/lastMonthExpense)*100) : null;
   const savingDelta = lastMonthSaving>0 ? Math.round(((monthSaving-lastMonthSaving)/lastMonthSaving)*100) : null;
 
-  return { thisMonth, cashInHand, openingBalance, leftover, monthWithdrawn, monthSavingFromCash, monthIncome, monthExpense, monthSaving, monthLeftover, byCat, sportsSaved, totalSaving, totalSavingFromCash, totalSavingExternal, totalWithdrawn, totalIncome, days, months, tax80c, fy, expenseDelta, savingDelta };
+  return { thisMonth, cashInHand, openingBalance, openingCarry: curM.carry, monthClearance, monthExpenseReal, leftover, monthWithdrawn, monthSavingFromCash, monthIncome, monthExpense, monthSaving, monthLeftover, byCat, goalProgress, netByCategory, totalSaving, totalSavingFromCash, totalSavingExternal, totalWithdrawn, totalIncome, days, months, tax80c, fy, expenseDelta, savingDelta };
 }
+
+// The automatic "Previous balance" expense (calculated, so it can never go stale)
+function autoEntry(key, prevKey, amount) {
+  return { id: "auto-" + key, type: "expense", amount, category: CLEARANCE_CATEGORY, date: key + "-01", note: "Shortfall from " + monthLabel(prevKey) + " cleared", auto: true };
+}
+function allExpensesView() { return buildLedger().flatMap(m => m.txns.filter(t => t.auto)); }
+// Real entries plus the automatic ones, for display lists
+function viewTxns() { return DB.txns.concat(allExpensesView()); }
 
 // Month-by-month ledger: opening balance, movements, closing balance
 function buildLedger() {
@@ -200,9 +240,15 @@ function buildLedger() {
     const saved = mt.filter(t=>t.type==="saving" && t.source!=="external").reduce((s,t)=>s+t.amount,0);
     const withdrawn = mt.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
     const opening = running;
+    // A negative balance from the previous month is cleared as an expense in this month.
+    // (Cash is unchanged: that shortfall is already inside the running balance.)
+    const clearance = Math.max(0, -opening);
+    const carry = Math.max(0, opening);
     const closing = opening + income - expense - saved + withdrawn;
     running = closing;
-    out.push({ key, prevKey, opening, closing, income, expense, saved, withdrawn, txns: sortTxns(mt) });
+    const rows = sortTxns(mt);
+    if (clearance > 0 && prevKey) rows.push(autoEntry(key, prevKey, clearance));
+    out.push({ key, prevKey, opening, carry, clearance, closing, income, expense, spent: expense + clearance, saved, withdrawn, txns: rows });
     prevKey = key;
   });
   return out.reverse(); // newest first
@@ -275,14 +321,16 @@ function metricCard(label, value, opts) {
 }
 function txnRow(t, editable) {
   const meta = TYPE_META[t.type];
+  if (t.auto) editable = false;
   const clickAttr = editable ? `onclick="openEdit('${t.id}')"` : "";
+  const autoTag = t.auto ? `<span class="pill" style="background:var(--brass-tint);color:var(--brass);margin-left:6px;vertical-align:1px">Auto</span>` : "";
   const extTag = (t.type === "saving" && t.source === "external") ? `<span class="pill" style="background:var(--brass-tint);color:var(--brass);margin-left:6px;vertical-align:1px">Outside income</span>` : "";
   const wdTag = t.type === "withdrawal" ? `<span class="pill" style="background:var(--withdraw-tint);color:var(--withdraw);margin-left:6px;vertical-align:1px">To cash</span>` : "";
   return `<button class="row" ${clickAttr} style="${editable?'':'cursor:default'}">
     <div style="display:flex;align-items:center;gap:11px;min-width:0;flex:1">
       <span class="icon-badge" style="background:${meta.tint};color:${meta.color}">${icon(catIcon(t.type),15)}</span>
       <div style="min-width:0;text-align:left">
-        <p style="font-size:13.5px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)">${esc(t.category)}${extTag}${wdTag}</p>
+        <p style="font-size:13.5px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)">${esc(t.category)}${extTag}${wdTag}${autoTag}</p>
         <p style="font-size:11.5px;color:var(--ink-faint);margin:0">${fmtDateShort(t.date)}${t.note?` \u00b7 ${esc(t.note)}`:""}</p>
       </div>
     </div>
@@ -295,7 +343,7 @@ function sectionLabel(text, iconName) {
 
 /* ==================== tab views ==================== */
 function viewHome(stats) {
-  const recent = sortTxns(DB.txns).slice(0,5);
+  const recent = sortTxns(viewTxns()).slice(0,5);
   const topCats = Object.entries(stats.byCat).sort((a,b)=>b[1]-a[1]).slice(0,4);
   const maxCat = topCats.length ? topCats[0][1] : 1;
   const due = dueRecurring(stats.thisMonth);
@@ -322,9 +370,10 @@ function viewHome(stats) {
     ${metricCard("Income this month", stats.monthIncome)}
     ${metricCard("Spent this month", stats.monthExpense, { delta: stats.expenseDelta, deltaGood: "down" })}
     ${metricCard("Saved this month", stats.monthSaving, { delta: stats.savingDelta, deltaGood: "up" })}
-    ${metricCard("Left over", stats.leftover, { highlight: true, note: stats.openingBalance !== 0 ? `Incl. ${fmtINR(stats.openingBalance)} brought forward` : "" })}
+    ${metricCard("Left over", stats.leftover, { highlight: true, note: stats.monthClearance > 0 ? `After clearing ${fmtINR(stats.monthClearance)} from last month` : (stats.openingCarry > 0 ? `Incl. ${fmtINR(stats.openingCarry)} brought forward` : "") })}
   </div>`;
 
+  html += safeToSpendCard(stats);
   html += reconcileCard(stats);
 
   html += `<div class="card">${sectionLabel("6-month trend \u00b7 month-end balance")}${trendChart(stats.months)}</div>`;
@@ -338,14 +387,7 @@ function viewHome(stats) {
     html += `</div></div>`;
   }
 
-  if (DB.goals.sportsTarget > 0) {
-    const pct = Math.min(100, (stats.sportsSaved/DB.goals.sportsTarget)*100);
-    html += `<div class="card">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span class="icon-badge" style="background:var(--saving-tint);color:var(--saving)">${icon('sprout',15)}</span><p style="font-size:13px;font-weight:700;margin:0">Sports fund \u00b7 Hyrox / IRONMAN</p></div>
-      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px"><span style="color:var(--ink-soft)">${fmtINR(stats.sportsSaved)} of ${fmtINR(DB.goals.sportsTarget)}</span><span class="num" style="font-weight:700">${Math.round(pct)}%</span></div>
-      <div class="track"><div class="fill" style="width:${pct}%;background:var(--saving)"></div></div>
-    </div>`;
-  }
+  html += homeGoalsCard(stats);
 
   html += `<div class="card">${sectionLabel("Recent activity")}`;
   if (!recent.length) html += `<p class="muted">Nothing logged yet — use the buttons above to add your first entry.</p>`;
@@ -356,22 +398,106 @@ function viewHome(stats) {
   return html;
 }
 
-// Shows exactly how "Left over" is built, including last month's balance
+// Shows exactly how "Left over" is built
 function reconcileCard(stats) {
   const row = (label, val, sign, color) => `<div style="display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0"><span style="color:var(--ink-soft)">${esc(label)}</span><span class="num" style="font-weight:700;color:${color||'var(--ink)'}">${sign}${fmtINR(Math.abs(val))}</span></div>`;
   const prev = monthLabel(monthKeyOffset(-1));
   let h = `<div class="card">${sectionLabel("This month, line by line")}`;
-  if (stats.openingBalance !== 0) {
-    h += stats.openingBalance < 0
-      ? row(`Last month's shortfall (${prev}) cleared`, stats.openingBalance, "\u2212", "var(--danger)")
-      : row(`Brought forward from ${prev}`, stats.openingBalance, "+", "var(--saving)");
-  }
+  if (stats.openingCarry > 0) h += row(`Brought forward from ${prev}`, stats.openingCarry, "+", "var(--saving)");
   h += row("Income", stats.monthIncome, "+", "var(--income)");
-  h += row("Spent", stats.monthExpense, "\u2212", "var(--expense)");
+  h += row("Spent", stats.monthExpenseReal, "\u2212", "var(--expense)");
+  if (stats.monthClearance > 0) h += row(`Previous balance cleared (${prev})`, stats.monthClearance, "\u2212", "var(--danger)");
   if (stats.monthSavingFromCash) h += row("Moved to savings", stats.monthSavingFromCash, "\u2212", "var(--saving)");
   if (stats.monthWithdrawn) h += row("Withdrawn from savings", stats.monthWithdrawn, "+", "var(--withdraw)");
   h += `<div style="display:flex;justify-content:space-between;padding-top:9px;margin-top:6px;border-top:1px solid var(--line);font-size:13px;font-weight:700"><span>Left over</span><span class="num" style="color:${stats.leftover<0?'var(--danger)':'var(--ink)'}">${fmtINR(stats.leftover)}</span></div></div>`;
   return h;
+}
+
+// "Safe to spend": what's left after bills you still have to pay this month, spread over the days remaining
+function safeToSpendCard(stats) {
+  const now = new Date();
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  const daysLeft = daysInMonth - now.getDate() + 1;
+  const pending = DB.recurring.filter(r => r.lastLoggedMonth !== stats.thisMonth);
+  const pendingOut = pending.filter(r => r.type === "expense" || (r.type === "saving" && r.source !== "external")).reduce((s,r)=>s+r.amount,0);
+  const safe = stats.leftover - pendingOut;
+  const rate = stats.monthIncome > 0 ? Math.round((stats.monthSaving / stats.monthIncome) * 100) : null;
+  let main;
+  if (safe > 0) main = `<span class="num" style="font-size:20px;font-weight:700">${fmtINR(Math.floor(safe / daysLeft))}</span><span style="font-size:12px;color:var(--ink-soft)"> per day for the next ${daysLeft} day${daysLeft===1?"":"s"}</span>`;
+  else main = `<span class="num" style="font-size:20px;font-weight:700;color:var(--danger)">${fmtINR(safe)}</span><span style="font-size:12px;color:var(--ink-soft)"> \u2014 over by this much; it will show as "Previous balance" in next month's spending</span>`;
+  const sub = [];
+  if (pendingOut > 0) sub.push(`after ${fmtINR(pendingOut)} of bills still due`);
+  if (rate !== null) sub.push(`savings rate ${rate}%`);
+  return `<div class="card">${sectionLabel("Safe to spend")}<div>${main}</div>${sub.length ? `<p style="font-size:11.5px;color:var(--ink-faint);margin:6px 0 0">${sub.join(" \u00b7 ")}</p>` : ""}</div>`;
+}
+
+// Months from now until a "YYYY-MM" goal date (inclusive of the current month)
+function monthsUntil(ym) {
+  if (!ym) return 0;
+  const [y, m] = ym.split("-").map(Number);
+  const now = new Date();
+  return (y - now.getFullYear()) * 12 + (m - 1 - now.getMonth()) + 1;
+}
+function goalCaption(g) {
+  const remaining = Math.max(0, g.target - g.saved);
+  if (g.target > 0 && remaining === 0) return "Goal reached";
+  if (g.date && g.target > 0) {
+    const n = monthsUntil(g.date);
+    const label = new Date(g.date + "-01T00:00:00").toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+    if (n <= 0) return `${fmtINR(remaining)} still to go \u00b7 target date ${label} has passed`;
+    return `${fmtINR(Math.ceil(remaining / n))}/month to reach it by ${label}`;
+  }
+  return g.target > 0 ? `${fmtINR(remaining)} to go` : "Set a target to track progress";
+}
+function goalBar(g) {
+  const pct = g.target > 0 ? Math.min(100, (g.saved / g.target) * 100) : 0;
+  return `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px"><span style="color:var(--ink-soft)">${fmtINR(g.saved)}${g.target>0?` of ${fmtINR(g.target)}`:""}</span><span class="num" style="font-weight:700">${g.target>0?Math.round(pct)+"%":""}</span></div>
+    <div class="track"><div class="fill" style="width:${pct}%;background:var(--saving)"></div></div>
+    <p style="font-size:11.5px;color:var(--ink-faint);margin:6px 0 0">${esc(goalCaption(g))}</p>`;
+}
+function homeGoalsCard(stats) {
+  const goals = stats.goalProgress;
+  if (!goals.length) {
+    return `<div class="card">${sectionLabel("Savings goals","goals")}<p class="muted" style="margin:0 0 10px">Saving for something specific? Create your own goal \u2014 a race, a gadget, an emergency fund.</p><button class="btn-ghost" style="width:100%;padding:9px;font-size:12.5px" onclick="setTab('goals')">Set up a goal</button></div>`;
+  }
+  let h = `<div class="card">${sectionLabel("Savings goals","goals")}`;
+  goals.forEach((g, i) => { h += `<div style="${i? "margin-top:16px":""}"><p style="font-size:13px;font-weight:700;margin:0 0 8px">${esc(g.name)}</p>${goalBar(g)}</div>`; });
+  return h + `</div>`;
+}
+
+// Goals tab: add, rename, retarget and delete your own savings goals
+function viewGoalList(stats) {
+  let h = `<div class="card">${sectionLabel("Your savings goals","goals")}`;
+  if (!stats.goalProgress.length && !UI.goalFormOpen) h += `<p class="muted" style="margin:0 0 12px">No goals yet. Add one \u2014 it also becomes a category you can pick when you add a saving.</p>`;
+  stats.goalProgress.forEach((g, i) => {
+    h += `<div style="${i? "margin-top:16px;padding-top:16px;border-top:1px solid var(--line)":""}">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <input type="text" value="${esc(g.name)}" onchange="renameGoal('${g.id}', this.value)" style="flex:1;font-weight:700"/>
+        <button onclick="deleteGoal('${g.id}')" aria-label="Delete goal" style="border:none;background:none;cursor:pointer;padding:6px;color:var(--ink-faint)">${icon('trash',15)}</button>
+      </div>
+      <div class="flex-gap" style="margin-bottom:10px">
+        <div style="flex:1"><label class="fl">Target (\u20B9)</label><input type="number" min="0" step="1000" value="${g.target||''}" placeholder="0" onchange="setGoalField('${g.id}','target',this.value)"/></div>
+        <div style="flex:1"><label class="fl">Reach it by (optional)</label><input type="month" value="${esc(g.date||'')}" onchange="setGoalField('${g.id}','date',this.value)"/></div>
+      </div>
+      ${goalBar(g)}
+    </div>`;
+  });
+  if (UI.goalFormOpen) {
+    h += `<div style="${stats.goalProgress.length? "margin-top:16px;padding-top:16px;border-top:1px solid var(--line)":""}">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div><label class="fl">Goal name</label><input id="goalName" type="text" placeholder="e.g. Hyrox / IRONMAN, New laptop"/></div>
+        <div class="flex-gap">
+          <div style="flex:1"><label class="fl">Target (\u20B9)</label><input id="goalTarget" type="number" min="0" step="1000" placeholder="0"/></div>
+          <div style="flex:1"><label class="fl">Reach it by (optional)</label><input id="goalDate" type="month"/></div>
+        </div>
+        <p id="goalError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
+      </div>
+      <div class="flex-gap" style="margin-top:12px"><button class="btn-ghost" style="flex:1" onclick="closeGoalForm()">Cancel</button><button class="btn-primary" style="flex:1" onclick="submitGoal()">Add goal</button></div>
+    </div>`;
+  } else {
+    h += `<button class="btn-ghost" style="width:100%;margin-top:${stats.goalProgress.length?'16px':'0'};display:flex;align-items:center;justify-content:center;gap:6px" onclick="openGoalForm()">${icon('plus',14)} Add a goal</button>`;
+  }
+  return h + `</div>`;
 }
 
 function addPageButton(type, label) {
@@ -407,7 +533,7 @@ function viewIncome(stats) {
 }
 
 function viewList(type, emptyText) {
-  const base = type === "saving" ? DB.txns.filter(t=>t.type==="saving"||t.type==="withdrawal") : DB.txns.filter(t=>t.type===type);
+  const base = type === "saving" ? DB.txns.filter(t=>t.type==="saving"||t.type==="withdrawal") : viewTxns().filter(t=>t.type===type);
   const list = sortTxns(base.filter(inScope));
   let html = addPageButton(type, type === "saving" ? "Add saving" : "Add expense");
   if (type === "saving") {
@@ -436,11 +562,11 @@ function viewHistory() {
         <p style="font-size:14px;font-weight:700;margin:0">${esc(monthLong(m.key))}</p>
         <p style="font-size:11px;color:var(--ink-soft);margin:0">Closing <span class="num" style="font-weight:700;color:${m.closing<0?'var(--danger)':'var(--ink)'}">${fmtINR(m.closing)}</span></p>
       </div>
-      <p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">In ${fmtINR(m.income + m.withdrawn)} \u00b7 Out ${fmtINR(m.expense + m.saved)}</p>`;
+      <p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">${m.carry>0?`Brought fwd ${fmtINR(m.carry)} \u00b7 `:""}In ${fmtINR(m.income + m.withdrawn)} \u00b7 Out ${fmtINR(m.spent + m.saved)}</p>`;
     if (!rows.length) html += `<p class="muted" style="margin:6px 0">Nothing logged.</p>`;
     rows.forEach(t => html += txnRow(t, true));
-    if (f === "all" && m.opening !== 0 && m.prevKey) {
-      const neg = m.opening < 0;
+    if (f === "all" && m.carry > 0 && m.prevKey) {
+      const neg = false;
       html += `<div class="row" style="cursor:default;background:var(--brass-tint);margin:6px -8px 0;padding:11px 8px;border-radius:10px;border-bottom:none;width:auto">
         <div style="display:flex;align-items:center;gap:11px;min-width:0;flex:1">
           <span class="icon-badge" style="background:var(--card);color:var(--brass)">${icon('repeat',15)}</span>
@@ -505,11 +631,7 @@ function viewGoals(stats) {
   });
   html += `</div></div>`;
 
-  html += `<div class="card">${sectionLabel("Sports fund target \u00b7 Hyrox / IRONMAN")}
-    <input id="sportsTargetInput" type="number" min="0" step="1000" placeholder="Total target amount" value="${DB.goals.sportsTarget||''}"/>
-  </div>`;
-
-  html += `<div style="margin-bottom:14px"><button class="btn-primary" onclick="saveGoalsForm()">Save goals</button></div>`;
+  html += viewGoalList(stats);
 
   const pct80c = Math.min(100, (stats.tax80c/TAX_80C_LIMIT)*100);
   html += `<div class="card">${sectionLabel(`80C tax saving \u00b7 ${stats.fy.label}`, "shield")}
@@ -676,7 +798,7 @@ function viewWithdrawSheet() {
       <p class="muted" style="margin:0 0 16px">Moves money back into your cash in hand — for whenever you need to dip into savings.</p>
       <div style="display:flex;flex-direction:column;gap:12px">
         <div><label class="fl">Amount (\u20B9)</label><input id="wAmount" type="number" min="0" step="1" placeholder="0"/></div>
-        <div><label class="fl">Withdraw from which saving?</label><select id="wCategory">${CATS_SAVING.map(c=>`<option value="${esc(c)}">${esc(c)} \u2014 net saved ${fmtINR(netSavedFor(c))}</option>`).join("")}</select></div>
+        <div><label class="fl">Withdraw from which saving?</label><select id="wCategory">${savingCategories().map(c=>`<option value="${esc(c)}">${esc(c)} \u2014 net saved ${fmtINR(netSavedFor(c))}</option>`).join("")}</select></div>
         <div><label class="fl">Date</label><input id="wDate" type="date" value="${todayIso()}"/></div>
         <div><label class="fl">Note (optional)</label><input id="wNote" type="text" placeholder="e.g. medical expense, needed cash"/></div>
         <p id="wError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
@@ -983,10 +1105,47 @@ function onBudgetChange(cat, val) {
   saveGoalsPatch({ monthlyBudgets: budgets });
   render();
 }
-function saveGoalsForm() {
-  const v = Number(document.getElementById("sportsTargetInput").value)||0;
-  saveGoalsPatch({ sportsTarget: v });
-  render();
+function openGoalForm() { UI.goalFormOpen = true; render(); }
+function closeGoalForm() { UI.goalFormOpen = false; render(); }
+function goalNameTaken(name, exceptId) {
+  const n = name.trim().toLowerCase();
+  const taken = [...CATS_SAVING_BASE, "Other"].some(c => c.toLowerCase() === n)
+    || (DB.goals.custom || []).some(g => g.id !== exceptId && g.name.toLowerCase() === n);
+  return taken;
+}
+function submitGoal() {
+  const name = document.getElementById("goalName").value.trim();
+  const target = Number(document.getElementById("goalTarget").value) || 0;
+  const date = document.getElementById("goalDate").value || "";
+  const err = document.getElementById("goalError");
+  if (!name) { err.textContent = "Give your goal a name."; err.style.display = "block"; return; }
+  if (goalNameTaken(name)) { err.textContent = "You already have a goal or category with that name."; err.style.display = "block"; return; }
+  DB.goals.custom.push({ id: uid(), name, target, date });
+  UI.goalFormOpen = false;
+  saveDB(); render();
+}
+function setGoalField(id, field, value) {
+  const g = DB.goals.custom.find(x => x.id === id);
+  if (!g) return;
+  g[field] = field === "target" ? (Number(value) || 0) : value;
+  saveDB(); render();
+}
+// Renaming also updates past entries so your history and progress stay attached to the goal
+function renameGoal(id, value) {
+  const g = DB.goals.custom.find(x => x.id === id);
+  const name = value.trim();
+  if (!g || name === g.name) { render(); return; }
+  if (!name || goalNameTaken(name, id)) { alert(!name ? "A goal needs a name." : "You already have a goal or category with that name."); render(); return; }
+  const old = g.name;
+  DB.txns.forEach(t => { if ((t.type==="saving"||t.type==="withdrawal") && t.category === old) t.category = name; });
+  DB.recurring.forEach(r => { if (r.type==="saving" && r.category === old) r.category = name; });
+  g.name = name;
+  saveDB(); render();
+}
+function deleteGoal(id) {
+  if (!confirm("Remove this goal? Your past savings entries stay in your history.")) return;
+  DB.goals.custom = DB.goals.custom.filter(x => x.id !== id);
+  saveDB(); render();
 }
 
 function doLogRecurring(id) { const stats = computeStats(); logRecurring(id, stats.thisMonth); render(); }
