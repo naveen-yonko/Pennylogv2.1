@@ -3,6 +3,14 @@ const CATS_EXPENSE = ["Food","Transport","Rent","Utilities","Shopping","Health",
 const CATS_SAVING_BASE = ["SIP / Index fund","PPF","ELSS","Emergency fund"];
 const LEGACY_SPORTS = "Sports fund (Hyrox/IRONMAN)"; // old hardcoded goal, migrated into a customizable goal
 const CLEARANCE_CATEGORY = "Previous balance";
+const DEFAULT_ACCOUNTS = [{ id: "acc-cash", name: "Cash", opening: 0 }, { id: "acc-bank", name: "Bank / UPI", opening: 0 }];
+const DEFAULT_PRESETS = [
+  { id: "pre-tea", label: "Tea", amount: 30, type: "expense", category: "Food" },
+  { id: "pre-lunch", label: "Lunch", amount: 150, type: "expense", category: "Food" },
+  { id: "pre-bus", label: "Bus", amount: 50, type: "expense", category: "Transport" },
+  { id: "pre-groc", label: "Groceries", amount: 500, type: "expense", category: "Food" },
+];
+const LOCKED_CATS = { expense: ["Other"], income: ["Salary", "Other"] }; // built-ins the app relies on
 const CATS_INCOME = ["Salary","Freelance","Bonus","Interest","Gift","Other"];
 const TAX_80C_LIMIT = 150000;
 const GITHUB_REPO = "https://github.com/naveen-yonko/PennyLog";
@@ -12,6 +20,7 @@ const TYPE_META = {
   income:     { label: "Income",     color: "var(--income)",  tint: "var(--income-tint)",  sign: "+" },
   expense:    { label: "Expense",    color: "var(--expense)", tint: "var(--expense-tint)", sign: "\u2212" },
   saving:     { label: "Saving",     color: "var(--saving)",  tint: "var(--saving-tint)",  sign: "+" },
+  transfer:   { label: "Transfer", color: "var(--ink-soft)", tint: "rgba(28,27,25,0.07)", sign: "" },
   withdrawal: { label: "Withdrawal", color: "var(--withdraw)", tint: "var(--withdraw-tint)", sign: "+" },
 };
 
@@ -37,12 +46,16 @@ const ICONS = {
   eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.7A9.9 9.9 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a13.8 13.8 0 0 1-3 3.6M6.4 6.4C4 8 2.5 10.5 2.5 12c0 0 3.5 6.5 9.5 6.5 1.4 0 2.7-.3 3.8-.9"/><path d="M9.9 10a2.5 2.5 0 0 0 3.5 3.5"/>',
   menu: '<path d="M4 6.5h16M4 12h16M4 17.5h16"/>',
   history: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  transfer: '<path d="M4 8h13"/><path d="M14 4.5 17.5 8 14 11.5"/><path d="M20 16H7"/><path d="M10 12.5 6.5 16 10 19.5"/>',
+  accounts: '<rect x="3.5" y="6.5" width="17" height="12" rx="2"/><path d="M3.5 10.5h17"/><path d="M15.5 14.5h2"/>',
+  tag: '<path d="M3.5 12.5V5.5a2 2 0 0 1 2-2h7l8 8-9 9-8-8Z"/><circle cx="8.5" cy="8.5" r="1.1"/>',
+  bolt: '<path d="M13 3.5 5.5 13.5H11L10 20.5l7.5-10H12L13 3.5Z"/>',
 };
 function icon(name, size) {
   size = size || 18;
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
 }
-function catIcon(type) { return (type === "income" || type === "withdrawal") ? "income" : type === "saving" ? "sprout" : "expense"; }
+function catIcon(type) { return type === "transfer" ? "transfer" : (type === "income" || type === "withdrawal") ? "income" : type === "saving" ? "sprout" : "expense"; }
 // Savings categories = built-ins + your own goals + any older category still used by past entries
 function savingCategories() {
   const names = [...CATS_SAVING_BASE];
@@ -51,7 +64,9 @@ function savingCategories() {
   names.push("Other");
   return names;
 }
-function catsFor(type) { return type === "income" ? CATS_INCOME : type === "saving" ? savingCategories() : CATS_EXPENSE; }
+function expenseCategories() { return DB.goals.expenseCats; }
+function incomeCategories() { return DB.goals.incomeCats; }
+function catsFor(type) { return type === "income" ? incomeCategories() : type === "saving" ? savingCategories() : expenseCategories(); }
 
 /* ==================== helpers ==================== */
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
@@ -74,6 +89,31 @@ function cashEffect(t) {
   if (t.type === "saving") return t.source === "external" ? 0 : -t.amount;
   return 0;
 }
+// ---- accounts: where your money physically sits (Cash, Bank / UPI, ...) ----
+function acctById(id) { return DB.goals.accounts.find(a => a.id === id); }
+function resolveAcct(id) { return acctById(id) ? id : DB.goals.defaultAccount; }
+function acctName(id) { const a = acctById(resolveAcct(id)); return a ? a.name : "Account"; }
+// How one transaction moves each account's balance (entries without an account use the default account)
+function accountEffects(t) {
+  const a = t.amount;
+  if (t.type === "income" || t.type === "withdrawal") return [[resolveAcct(t.account), a]];
+  if (t.type === "expense") return [[resolveAcct(t.account), -a]];
+  if (t.type === "saving") return t.source === "external" ? [] : [[resolveAcct(t.account), -a]];
+  if (t.type === "transfer") return [[resolveAcct(t.from), -a], [resolveAcct(t.to), a]];
+  return [];
+}
+function accountBalances() {
+  const bal = {};
+  DB.goals.accounts.forEach(a => { bal[a.id] = a.opening || 0; });
+  DB.txns.forEach(t => accountEffects(t).forEach(([id, d]) => { bal[id] += d; }));
+  return bal;
+}
+function openingTotal() { return DB.goals.accounts.reduce((s, a) => s + (a.opening || 0), 0); }
+function titleOf(t) { return t.type === "transfer" ? acctName(t.from) + " \u2192 " + acctName(t.to) : t.category; }
+function acctPart(t) {
+  if (t.auto || t.type === "transfer" || (t.type === "saving" && t.source === "external")) return "";
+  return DB.goals.accounts.length > 1 ? " \u00b7 " + esc(acctName(t.account)) : "";
+}
 function sortTxns(list) { return [...list].sort((a,b) => b.date.localeCompare(a.date)); }
 function monthLabel(key) { const [y,m] = key.split("-"); return new Date(Number(y), Number(m)-1, 1).toLocaleDateString("en-GB", { month: "short" }); }
 function fyRange(now) {
@@ -94,6 +134,14 @@ function normalizeDB(d) {
   d.recurring = d.recurring || [];
   d.goals = Object.assign({ monthlyBudgets: {}, sportsTarget: 0, monthlySalary: 0 }, d.goals || {});
   if (!Array.isArray(d.goals.custom)) d.goals.custom = [];
+  const g = d.goals;
+  if (!Array.isArray(g.accounts) || !g.accounts.length) g.accounts = DEFAULT_ACCOUNTS.map(a => ({ ...a }));
+  if (!g.accounts.some(a => a.id === g.defaultAccount)) g.defaultAccount = (g.accounts.find(a => a.id === "acc-bank") || g.accounts[0]).id;
+  if (!Array.isArray(g.expenseCats) || !g.expenseCats.length) g.expenseCats = [...CATS_EXPENSE];
+  if (!Array.isArray(g.incomeCats) || !g.incomeCats.length) g.incomeCats = [...CATS_INCOME];
+  LOCKED_CATS.expense.forEach(c => { if (!g.expenseCats.includes(c)) g.expenseCats.push(c); });
+  LOCKED_CATS.income.forEach(c => { if (!g.incomeCats.includes(c)) g.incomeCats.push(c); });
+  if (!Array.isArray(g.presets)) g.presets = DEFAULT_PRESETS.map(x => ({ ...x }));
   if (!d.goals.migratedV3) {
     const used = d.txns.some(t => t.category === LEGACY_SPORTS);
     if ((d.goals.sportsTarget > 0 || used) && !d.goals.custom.some(g => g.name === LEGACY_SPORTS)) {
@@ -110,7 +158,7 @@ function loadLocalDB() {
 function saveLocalDB() { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 
 let DB = normalizeDB(loadLocalDB());
-let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
+let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, showTransfer: false, editingTransferId: null, showAccounts: false, catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
 let AUTH = { user: null, ready: false, mode: "login", error: "", syncState: "offline" };
 let suppressNextSnapshotEcho = false;
 
@@ -159,7 +207,7 @@ function computeStats() {
   const totalSavingExternal = totalSavingRaw - totalSavingFromCash;
   const totalWithdrawn = txns.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
   const totalSaving = totalSavingRaw - totalWithdrawn; // net currently saved
-  const cashInHand = totalIncome - totalExpense - totalSavingFromCash + totalWithdrawn;
+  const cashInHand = openingTotal() + totalIncome - totalExpense - totalSavingFromCash + totalWithdrawn;
 
   const monthTxns = txns.filter(t=>monthKey(t.date)===thisMonth);
   const monthIncome = monthTxns.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
@@ -198,7 +246,7 @@ function computeStats() {
   for (let i=5;i>=0;i--) {
     const key = monthKeyOffset(-i);
     // month-end balance = everything up to and including that month
-    const closing = txns.filter(t=>monthKey(t.date)<=key).reduce((s,t)=>s+cashEffect(t),0);
+    const closing = openingTotal() + txns.filter(t=>monthKey(t.date)<=key).reduce((s,t)=>s+cashEffect(t),0);
     months.push({ key, leftover: closing });
   }
   const fy = fyRange();
@@ -214,7 +262,7 @@ function computeStats() {
   const expenseDelta = lastMonthExpense>0 ? Math.round(((monthExpense-lastMonthExpense)/lastMonthExpense)*100) : null;
   const savingDelta = lastMonthSaving>0 ? Math.round(((monthSaving-lastMonthSaving)/lastMonthSaving)*100) : null;
 
-  return { thisMonth, cashInHand, openingBalance, openingCarry: curM.carry, monthClearance, monthExpenseReal, leftover, monthWithdrawn, monthSavingFromCash, monthIncome, monthExpense, monthSaving, monthLeftover, byCat, goalProgress, netByCategory, totalSaving, totalSavingFromCash, totalSavingExternal, totalWithdrawn, totalIncome, days, months, tax80c, fy, expenseDelta, savingDelta };
+  return { thisMonth, cashInHand, openingBalance, openingCarry: curM.carry, openingFrom: curM.prevKey || null, accountBalances: accountBalances(), monthClearance, monthExpenseReal, leftover, monthWithdrawn, monthSavingFromCash, monthIncome, monthExpense, monthSaving, monthLeftover, byCat, goalProgress, netByCategory, totalSaving, totalSavingFromCash, totalSavingExternal, totalWithdrawn, totalIncome, days, months, tax80c, fy, expenseDelta, savingDelta };
 }
 
 // The automatic "Previous balance" expense (calculated, so it can never go stale)
@@ -231,7 +279,7 @@ function buildLedger() {
   const keys = new Set(txns.map(t => monthKey(t.date)));
   keys.add(todayIso().slice(0,7));
   const sorted = [...keys].sort();
-  let running = 0, prevKey = null;
+  let running = openingTotal(), prevKey = null;
   const out = [];
   sorted.forEach(key => {
     const mt = txns.filter(t => monthKey(t.date) === key);
@@ -242,8 +290,9 @@ function buildLedger() {
     const opening = running;
     // A negative balance from the previous month is cleared as an expense in this month.
     // (Cash is unchanged: that shortfall is already inside the running balance.)
-    const clearance = Math.max(0, -opening);
-    const carry = Math.max(0, opening);
+    const first = prevKey === null;
+    const clearance = first ? 0 : Math.max(0, -opening);
+    const carry = first ? opening : Math.max(0, opening);
     const closing = opening + income - expense - saved + withdrawn;
     running = closing;
     const rows = sortTxns(mt);
@@ -268,7 +317,7 @@ function deleteRecurring(id) { DB.recurring = DB.recurring.filter(r => r.id!==id
 function logRecurring(id, thisMonth) {
   const item = DB.recurring.find(r=>r.id===id);
   if (!item) return;
-  DB.txns.unshift({ id: uid(), type:item.type, amount:item.amount, category:item.category, date:todayIso(), note:item.note||"Recurring", source: item.source || "income" });
+  DB.txns.unshift({ id: uid(), type:item.type, amount:item.amount, category:item.category, date:todayIso(), note:item.note||"Recurring", source: item.source || "income", account: item.account });
   DB.recurring = DB.recurring.map(r => r.id===id ? {...r, lastLoggedMonth: thisMonth} : r);
   saveDB();
 }
@@ -330,8 +379,8 @@ function txnRow(t, editable) {
     <div style="display:flex;align-items:center;gap:11px;min-width:0;flex:1">
       <span class="icon-badge" style="background:${meta.tint};color:${meta.color}">${icon(catIcon(t.type),15)}</span>
       <div style="min-width:0;text-align:left">
-        <p style="font-size:13.5px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)">${esc(t.category)}${extTag}${wdTag}${autoTag}</p>
-        <p style="font-size:11.5px;color:var(--ink-faint);margin:0">${fmtDateShort(t.date)}${t.note?` \u00b7 ${esc(t.note)}`:""}</p>
+        <p style="font-size:13.5px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)">${esc(titleOf(t))}${extTag}${wdTag}${autoTag}</p>
+        <p style="font-size:11.5px;color:var(--ink-faint);margin:0">${fmtDateShort(t.date)}${acctPart(t)}${t.note?` \u00b7 ${esc(t.note)}`:""}</p>
       </div>
     </div>
     <span class="num" style="font-size:13.5px;font-weight:700;color:${meta.color};flex-shrink:0">${meta.sign}${fmtINR(t.amount)}</span>
@@ -373,6 +422,7 @@ function viewHome(stats) {
     ${metricCard("Left over", stats.leftover, { highlight: true, note: stats.monthClearance > 0 ? `After clearing ${fmtINR(stats.monthClearance)} from last month` : (stats.openingCarry > 0 ? `Incl. ${fmtINR(stats.openingCarry)} brought forward` : "") })}
   </div>`;
 
+  html += homeAccountsCard(stats);
   html += safeToSpendCard(stats);
   html += reconcileCard(stats);
 
@@ -398,12 +448,23 @@ function viewHome(stats) {
   return html;
 }
 
+function homeAccountsCard(stats) {
+  const bal = stats.accountBalances;
+  let h = `<div class="card">${sectionLabel("Accounts","accounts")}`;
+  DB.goals.accounts.forEach(a => {
+    const v = bal[a.id] || 0;
+    h += `<div style="display:flex;justify-content:space-between;font-size:13px;padding:5px 0"><span>${esc(a.name)}</span><span class="num" style="font-weight:700;color:${v<0?'var(--danger)':'var(--ink)'}">${fmtINR(v)}</span></div>`;
+  });
+  h += `<div class="flex-gap" style="margin-top:10px"><button class="btn-ghost" style="flex:1;padding:9px;font-size:12.5px;display:flex;align-items:center;justify-content:center;gap:6px" onclick="openTransfer()">${icon('transfer',14)} Transfer</button><button class="btn-ghost" style="flex:1;padding:9px;font-size:12.5px" onclick="openAccounts()">Manage</button></div></div>`;
+  return h;
+}
+
 // Shows exactly how "Left over" is built
 function reconcileCard(stats) {
   const row = (label, val, sign, color) => `<div style="display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0"><span style="color:var(--ink-soft)">${esc(label)}</span><span class="num" style="font-weight:700;color:${color||'var(--ink)'}">${sign}${fmtINR(Math.abs(val))}</span></div>`;
-  const prev = monthLabel(monthKeyOffset(-1));
+  const prev = stats.openingFrom ? monthLabel(stats.openingFrom) : monthLabel(monthKeyOffset(-1));
   let h = `<div class="card">${sectionLabel("This month, line by line")}`;
-  if (stats.openingCarry > 0) h += row(`Brought forward from ${prev}`, stats.openingCarry, "+", "var(--saving)");
+  if (stats.openingCarry !== 0) h += row(stats.openingFrom ? `Brought forward from ${prev}` : "Opening balance", stats.openingCarry, stats.openingCarry < 0 ? "\u2212" : "+", stats.openingCarry < 0 ? "var(--danger)" : "var(--saving)");
   h += row("Income", stats.monthIncome, "+", "var(--income)");
   h += row("Spent", stats.monthExpenseReal, "\u2212", "var(--expense)");
   if (stats.monthClearance > 0) h += row(`Previous balance cleared (${prev})`, stats.monthClearance, "\u2212", "var(--danger)");
@@ -500,6 +561,11 @@ function viewGoalList(stats) {
   return h + `</div>`;
 }
 
+function quickChips(type) {
+  const list = DB.goals.presets.filter(p => p.type === type);
+  if (!list.length) return "";
+  return `<div class="chips" style="margin:-4px 0 14px">${list.map(p => `<button class="chip" onclick="openForm('${type}','${p.id}')">${esc(p.label)} ${fmtINR(p.amount)}</button>`).join("")}</div>`;
+}
 function addPageButton(type, label) {
   const meta = TYPE_META[type];
   return `<button class="btn-primary" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px;background:${meta.color}" onclick="openForm('${type}')">${icon('plus',15)} ${esc(label)}</button>`;
@@ -512,7 +578,7 @@ function inScope(t) { return UI.listScope === "all" || monthKey(t.date) === toda
 
 function viewIncome(stats) {
   const already = DB.txns.some(t=>t.type==="income"&&t.category==="Salary"&&monthKey(t.date)===stats.thisMonth);
-  let html = addPageButton("income", "Add income");
+  let html = addPageButton("income", "Add income") + quickChips("income");
   html += `<div class="card">${sectionLabel("Monthly salary")}
     <div style="display:flex;gap:8px;align-items:flex-end">
       <div style="flex:1"><label class="fl">Amount (\u20B9)</label><input id="salaryInput" type="number" min="0" step="1000" placeholder="0" value="${DB.goals.monthlySalary||''}"/></div>
@@ -535,7 +601,7 @@ function viewIncome(stats) {
 function viewList(type, emptyText) {
   const base = type === "saving" ? DB.txns.filter(t=>t.type==="saving"||t.type==="withdrawal") : viewTxns().filter(t=>t.type===type);
   const list = sortTxns(base.filter(inScope));
-  let html = addPageButton(type, type === "saving" ? "Add saving" : "Add expense");
+  let html = addPageButton(type, type === "saving" ? "Add saving" : "Add expense") + quickChips(type);
   if (type === "saving") {
     html += savingsBreakdown();
     html += `<button class="btn-withdraw" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px" onclick="openWithdraw()">${icon('download',15)} Withdraw from savings to cash</button>`;
@@ -553,29 +619,30 @@ function viewHistory() {
   const ledger = buildLedger();
   const f = UI.histFilter;
   const chip = (k, label) => `<button class="chip ${f===k?'on':''}" onclick="setHistFilter('${k}')">${label}</button>`;
-  let html = `<div class="chips">${chip('all','All')}${chip('income','Income')}${chip('expense','Spend')}${chip('saving','Savings')}</div>`;
+  let html = `<div class="chips">${chip('all','All')}${chip('income','Income')}${chip('expense','Spend')}${chip('saving','Savings')}${chip('transfer','Transfers')}</div>`;
   const match = (t) => f==="all" || (f==="saving" ? (t.type==="saving"||t.type==="withdrawal") : t.type===f);
   ledger.forEach(m => {
     const rows = m.txns.filter(match);
+    if (f !== "all" && !rows.length) return;
     html += `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
         <p style="font-size:14px;font-weight:700;margin:0">${esc(monthLong(m.key))}</p>
         <p style="font-size:11px;color:var(--ink-soft);margin:0">Closing <span class="num" style="font-weight:700;color:${m.closing<0?'var(--danger)':'var(--ink)'}">${fmtINR(m.closing)}</span></p>
       </div>
-      <p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">${m.carry>0?`Brought fwd ${fmtINR(m.carry)} \u00b7 `:""}In ${fmtINR(m.income + m.withdrawn)} \u00b7 Out ${fmtINR(m.spent + m.saved)}</p>`;
+      <p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">${m.carry!==0?`${m.prevKey?"Brought fwd":"Opening"} ${fmtINR(m.carry)} \u00b7 `:""}In ${fmtINR(m.income + m.withdrawn)} \u00b7 Out ${fmtINR(m.spent + m.saved)}</p>`;
     if (!rows.length) html += `<p class="muted" style="margin:6px 0">Nothing logged.</p>`;
     rows.forEach(t => html += txnRow(t, true));
-    if (f === "all" && m.carry > 0 && m.prevKey) {
-      const neg = false;
+    if (f === "all" && m.carry !== 0) {
+      const neg = m.carry < 0;
       html += `<div class="row" style="cursor:default;background:var(--brass-tint);margin:6px -8px 0;padding:11px 8px;border-radius:10px;border-bottom:none;width:auto">
         <div style="display:flex;align-items:center;gap:11px;min-width:0;flex:1">
           <span class="icon-badge" style="background:var(--card);color:var(--brass)">${icon('repeat',15)}</span>
           <div style="min-width:0;text-align:left">
-            <p style="font-size:13.5px;margin:0;color:var(--ink)">${neg ? "Previous balance cleared" : "Balance brought forward"}</p>
-            <p style="font-size:11.5px;color:var(--ink-soft);margin:0">From ${esc(monthLabel(m.prevKey))}${neg ? " \u00b7 shortfall adjusted against this month" : ""}</p>
+            <p style="font-size:13.5px;margin:0;color:var(--ink)">${m.prevKey ? "Balance brought forward" : "Opening balance"}</p>
+            <p style="font-size:11.5px;color:var(--ink-soft);margin:0">${m.prevKey ? "From " + esc(monthLabel(m.prevKey)) : "Starting balance of your accounts"}</p>
           </div>
         </div>
-        <span class="num" style="font-size:13.5px;font-weight:700;color:${neg?'var(--danger)':'var(--saving)'};flex-shrink:0">${neg?"":"+"}${fmtINR(m.opening)}</span>
+        <span class="num" style="font-size:13.5px;font-weight:700;color:${neg?'var(--danger)':'var(--saving)'};flex-shrink:0">${neg?"":"+"}${fmtINR(m.carry)}</span>
       </div>`;
     }
     html += `</div>`;
@@ -616,14 +683,14 @@ function savingsBreakdown() {
 
 function viewGoals(stats) {
   let html = `<div class="card">${sectionLabel("Monthly budget by category")}<div style="display:flex;flex-direction:column;gap:12px">`;
-  CATS_EXPENSE.forEach(cat => {
+  expenseCategories().forEach((cat, ci) => {
     const spent = stats.byCat[cat] || 0;
     const budget = (DB.goals.monthlyBudgets && DB.goals.monthlyBudgets[cat]) || 0;
     const pct = budget>0 ? Math.min(100,(spent/budget)*100) : 0;
     html += `<div>
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px">
         <span style="font-size:13px">${esc(cat)}</span>
-        <input type="number" min="0" step="100" placeholder="0" value="${budget||''}" data-budget-cat="${esc(cat)}" style="width:92px;height:30px;font-size:12.5px;padding:0 8px" onchange="onBudgetChange('${esc(cat)}', this.value)"/>
+        <input type="number" min="0" step="100" placeholder="0" value="${budget||''}" data-budget-cat="${esc(cat)}" style="width:92px;height:30px;font-size:12.5px;padding:0 8px" onchange="onBudgetChange(${ci}, this.value)"/>
       </div>
       ${budget>0 ? `<div class="track"><div class="fill" style="width:${pct}%;background:${pct>=100?'var(--danger)':'var(--saving)'}"></div></div>
       <p style="font-size:11px;color:var(--ink-faint);margin:4px 0 0">${fmtINR(spent)} of ${fmtINR(budget)} spent this month</p>` : ""}
@@ -641,6 +708,8 @@ function viewGoals(stats) {
   </div>`;
 
   html += viewRecurring(stats.thisMonth);
+  html += viewCategoriesCard();
+  html += viewPresetsCard();
 
   html += `<button class="btn-ghost" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-bottom:14px" onclick="exportCsv()">${icon('download',15)} Export all data (CSV)</button>`;
 
@@ -657,6 +726,52 @@ function viewAccountCard() {
     <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 12px;display:flex;align-items:center;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:${dotColor};display:inline-block"></span>${syncLabel}</p>
     <button class="btn-ghost" style="width:100%" onclick="doSignOut()">Sign out</button>
   </div>`;
+}
+
+function viewCategoriesCard() {
+  const type = UI.catTab;
+  const list = type === "income" ? DB.goals.incomeCats : DB.goals.expenseCats;
+  const chip = (k, label) => `<button class="chip ${type===k?'on':''}" onclick="setCatTab('${k}')">${label}</button>`;
+  let h = `<div class="card">${sectionLabel("Categories","tag")}<div class="chips" style="margin-bottom:10px">${chip('expense','Expense')}${chip('income','Income')}</div>`;
+  list.forEach((c, i) => {
+    const locked = LOCKED_CATS[type].includes(c);
+    h += `<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <input type="text" value="${esc(c)}" ${locked?'disabled':''} onchange="renameCategory('${type}', ${i}, this.value)" style="flex:1"/>
+      ${locked ? `<span class="pill" style="background:var(--line);color:var(--ink-soft)">Built in</span>` : `<button onclick="deleteCategory('${type}', ${i})" aria-label="Delete category" style="border:none;background:none;cursor:pointer;padding:6px;color:var(--ink-faint)">${icon('trash',15)}</button>`}
+    </div>`;
+  });
+  h += `<div style="display:flex;gap:8px;margin-top:12px"><input id="newCatName" type="text" placeholder="New ${type} category" style="flex:1"/><button class="btn-ghost" style="padding:0 16px;height:40px" onclick="addCategory()">Add</button></div></div>`;
+  return h;
+}
+
+function viewPresetsCard() {
+  let h = `<div class="card">${sectionLabel("Quick add presets","bolt")}`;
+  if (!DB.goals.presets.length && !UI.presetFormOpen) h += `<p class="muted" style="margin:0 0 12px">Save the things you log every day (tea, bus, lunch) as one-tap presets.</p>`;
+  DB.goals.presets.forEach(p => {
+    const meta = TYPE_META[p.type];
+    h += `<div class="row" style="cursor:default"><div><p style="font-size:13px;margin:0">${esc(p.label)}</p><p style="font-size:11.5px;color:var(--ink-soft);margin:0">${esc(meta.label)} \u00b7 ${esc(p.category)}</p></div>
+      <div style="display:flex;align-items:center;gap:10px"><span class="num" style="font-weight:700;font-size:13px;color:${meta.color}">${fmtINR(p.amount)}</span>
+      <button onclick="deletePreset('${p.id}')" aria-label="Delete preset" style="border:none;background:none;cursor:pointer;padding:3px;color:var(--ink-faint)">${icon('trash',14)}</button></div></div>`;
+  });
+  if (UI.presetFormOpen) {
+    h += `<div style="margin-top:12px;padding-top:12px;${DB.goals.presets.length?'border-top:1px solid var(--line)':''}">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="flex-gap">
+          <div style="flex:1"><label class="fl">Name</label><input id="presetLabel" type="text" placeholder="e.g. Tea"/></div>
+          <div style="width:96px"><label class="fl">Amount (\u20B9)</label><input id="presetAmount" type="number" min="0" placeholder="0"/></div>
+        </div>
+        <div class="flex-gap">
+          <div style="flex:1"><label class="fl">Type</label><select id="presetType" onchange="refreshPresetCats()"><option value="expense">Expense</option><option value="income">Income</option><option value="saving">Saving</option></select></div>
+          <div style="flex:1"><label class="fl">Category</label><select id="presetCategory">${catsFor("expense").map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("")}</select></div>
+        </div>
+        <p id="presetError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
+      </div>
+      <div class="flex-gap" style="margin-top:12px"><button class="btn-ghost" style="flex:1" onclick="closePresetForm()">Cancel</button><button class="btn-primary" style="flex:1" onclick="submitPreset()">Add preset</button></div>
+    </div>`;
+  } else {
+    h += `<button class="btn-ghost" style="width:100%;margin-top:${DB.goals.presets.length?'12px':'0'};display:flex;align-items:center;justify-content:center;gap:6px" onclick="openPresetForm()">${icon('plus',14)} Add a preset</button>`;
+  }
+  return h + `</div>`;
 }
 
 function viewRecurring(thisMonth) {
@@ -691,6 +806,7 @@ function viewRecurring(thisMonth) {
             <button type="button" class="srcbtn ${UI.recSource!=='external'?'on-income':''}" onclick="setRecSource('income')">From cash in hand</button>
             <button type="button" class="srcbtn ${UI.recSource==='external'?'on-external':''}" onclick="setRecSource('external')">Outside income</button>
           </div></div>` : ""}
+        ${(UI.recFormType !== "saving" || UI.recSource !== "external") ? `<div><label class="fl">Paid from</label><select id="recAccount">${accountOptions(DB.goals.defaultAccount)}</select></div>` : ""}
         <div><label class="fl">Note (optional)</label><input id="recNote" type="text" placeholder="e.g. house rent, Nifty 50 SIP"/></div>
         <p id="recError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
       </div>
@@ -739,6 +855,35 @@ function viewAbout() {
 }
 
 /* ==================== add/edit sheet ==================== */
+function accountOptions(selected) {
+  const bal = accountBalances();
+  return DB.goals.accounts.map(a => `<option value="${esc(a.id)}" ${a.id===selected?"selected":""}>${esc(a.name)} \u2014 ${fmtINR(bal[a.id])}</option>`).join("");
+}
+function sheetNeedsAccount(type) { return type === "income" || type === "expense" || (type === "saving" && UI.formSource !== "external"); }
+function accountBlock(type) {
+  if (!sheetNeedsAccount(type)) return "";
+  return `<div><label class="fl">${type === "income" ? "Received in" : "Paid from"}</label><select id="fAccount" onchange="UI.formAccount=this.value">${accountOptions(UI.formAccount)}</select></div>`;
+}
+function sourceBlock(type) {
+  if (type !== "saving") return "";
+  return `<div>
+    <label class="fl">Where did this money come from?</label>
+    <div class="flex-gap" id="sourceButtons">
+      <button type="button" class="srcbtn ${UI.formSource!=='external'?'on-income':''}" onclick="setSheetSource('income')">From cash in hand</button>
+      <button type="button" class="srcbtn ${UI.formSource==='external'?'on-external':''}" onclick="setSheetSource('external')">Outside income</button>
+    </div>
+    <p id="sourceHint" style="font-size:11px;color:var(--ink-faint);margin:6px 0 0">${UI.formSource==='external'
+      ? "Won't reduce your cash in hand \u2014 use this for side-hustle earnings or money invested directly, that never sat in your account as tracked income."
+      : "Will reduce your cash in hand, since this money is coming out of income you've already logged."}</p>
+  </div>`;
+}
+function presetBlock(type) {
+  if (UI.editingId) return "";
+  const list = DB.goals.presets.filter(p => p.type === type);
+  if (!list.length) return "";
+  return `<div><label class="fl">Quick fill</label><div class="chips" style="margin:0">${list.map(p => `<button type="button" class="chip" onclick="applyPreset('${p.id}')">${esc(p.label)} ${fmtINR(p.amount)}</button>`).join("")}</div></div>`;
+}
+
 function viewSheet() {
   const editingTxn = UI.editingId ? DB.txns.find(t=>t.id===UI.editingId) : null;
   const type = UI.formType;
@@ -746,22 +891,13 @@ function viewSheet() {
   const amt = editingTxn ? editingTxn.amount : "";
   const date = editingTxn ? editingTxn.date : todayIso();
   const note = editingTxn ? (editingTxn.note||"") : "";
+  const cats = catsFor(type).slice();
+  if (editingTxn && editingTxn.type === type && editingTxn.category && !cats.includes(editingTxn.category)) cats.push(editingTxn.category);
 
   const typeButtons = ["income","expense","saving"].map(t => {
     const m = TYPE_META[t]; const on = type===t;
     return `<button class="tabbtn ${on?'on':''}" style="${on?`background:${m.tint};color:${m.color}`:''}" onclick="setSheetType('${t}')">${m.label}</button>`;
   }).join("");
-
-  const sourceHtml = type === "saving" ? `<div>
-    <label class="fl">Where did this money come from?</label>
-    <div class="flex-gap" id="sourceButtons">
-      <button type="button" class="srcbtn ${UI.formSource!=='external'?'on-income':''}" onclick="setSheetSource('income')">From cash in hand</button>
-      <button type="button" class="srcbtn ${UI.formSource==='external'?'on-external':''}" onclick="setSheetSource('external')">Outside income</button>
-    </div>
-    <p id="sourceHint" style="font-size:11px;color:var(--ink-faint);margin:6px 0 0">${UI.formSource==='external'
-      ? "Won't reduce your cash in hand — use this for side-hustle earnings or money invested directly, that never sat in your account as tracked income."
-      : "Will reduce your cash in hand, since this money is coming out of income you've already logged."}</p>
-  </div>` : "";
 
   return `<div class="sheet-backdrop" onclick="closeSheet()">
     <div class="sheet" onclick="event.stopPropagation()">
@@ -771,9 +907,11 @@ function viewSheet() {
       </div>
       <div class="flex-gap" style="margin-bottom:14px" id="typeButtons">${typeButtons}</div>
       <div style="display:flex;flex-direction:column;gap:12px">
+        <div id="presetWrap">${presetBlock(type)}</div>
         <div><label class="fl">Amount (\u20B9)</label><input id="fAmount" type="number" min="0" step="1" placeholder="0" value="${amt}"/></div>
-        <div><label class="fl">Category</label><select id="fCategory">${catsFor(type).map(c=>`<option value="${esc(c)}" ${editingTxn&&editingTxn.category===c?'selected':''}>${esc(c)}</option>`).join("")}</select></div>
-        <div id="sourceWrap">${sourceHtml}</div>
+        <div><label class="fl">Category</label><select id="fCategory">${cats.map(c=>`<option value="${esc(c)}" ${editingTxn&&editingTxn.category===c?'selected':''}>${esc(c)}</option>`).join("")}</select></div>
+        <div id="sourceWrap">${sourceBlock(type)}</div>
+        <div id="accountWrap">${accountBlock(type)}</div>
         <div><label class="fl">Date</label><input id="fDate" type="date" value="${date}"/></div>
         <div><label class="fl">Note (optional)</label><input id="fNote" type="text" placeholder="e.g. groceries, monthly SIP" value="${esc(note)}"/></div>
         <p id="fError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
@@ -783,6 +921,70 @@ function viewSheet() {
           ? `<button onclick="doDeleteTxn()" aria-label="Delete" class="btn-ghost" style="width:46px;flex:0 0 auto;color:var(--danger);display:flex;align-items:center;justify-content:center">${icon('trash',16)}</button>`
           : `<button onclick="closeSheet()" class="btn-ghost" style="flex:1">Cancel</button>`}
         <button onclick="submitSheet()" class="btn-primary" style="flex:1;background:${meta.color}">${editingTxn?"Save changes":`Add ${meta.label.toLowerCase()}`}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Transfer money between your own accounts (doesn't change total cash in hand)
+function viewTransferSheet() {
+  const t = UI.editingTransferId ? DB.txns.find(x => x.id === UI.editingTransferId) : null;
+  const accts = DB.goals.accounts;
+  const from = t ? resolveAcct(t.from) : (acctById(UI.lastAccount) ? UI.lastAccount : DB.goals.defaultAccount);
+  const to = t ? resolveAcct(t.to) : (accts.find(a => a.id !== from) || accts[0]).id;
+  return `<div class="sheet-backdrop" onclick="closeTransfer()">
+    <div class="sheet" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <p style="font-size:16px;font-weight:700;margin:0">${t ? "Edit transfer" : "Transfer between accounts"}</p>
+        <button onclick="closeTransfer()" aria-label="Close" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);padding:4px">${icon('close',18)}</button>
+      </div>
+      <p class="muted" style="margin:0 0 16px">Moves money between your own accounts, like withdrawing cash from the bank. Your total cash in hand stays the same.</p>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div class="flex-gap">
+          <div style="flex:1"><label class="fl">From</label><select id="tFrom">${accountOptions(from)}</select></div>
+          <div style="flex:1"><label class="fl">To</label><select id="tTo">${accountOptions(to)}</select></div>
+        </div>
+        <div><label class="fl">Amount (\u20B9)</label><input id="tAmount" type="number" min="0" step="1" placeholder="0" value="${t ? t.amount : ""}"/></div>
+        <div><label class="fl">Date</label><input id="tDate" type="date" value="${t ? t.date : todayIso()}"/></div>
+        <div><label class="fl">Note (optional)</label><input id="tNote" type="text" placeholder="e.g. ATM withdrawal" value="${t ? esc(t.note||"") : ""}"/></div>
+        <p id="tError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
+      </div>
+      <div class="flex-gap" style="margin-top:18px">
+        ${t ? `<button onclick="deleteTransfer()" aria-label="Delete transfer" class="btn-ghost" style="width:46px;flex:0 0 auto;color:var(--danger);display:flex;align-items:center;justify-content:center">${icon('trash',16)}</button>` : `<button onclick="closeTransfer()" class="btn-ghost" style="flex:1">Cancel</button>`}
+        <button onclick="submitTransfer()" class="btn-primary" style="flex:1">${t ? "Save changes" : "Transfer"}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Manage accounts: rename, match to your real balance, choose the default, add or remove
+function viewAccountsSheet() {
+  const bal = accountBalances();
+  const rows = DB.goals.accounts.map(a => {
+    const isDef = a.id === DB.goals.defaultAccount;
+    return `<div style="padding:12px 0;border-bottom:1px solid var(--line)">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <input type="text" value="${esc(a.name)}" onchange="renameAccount('${a.id}', this.value)" style="flex:1;font-weight:700"/>
+        <button onclick="deleteAccount('${a.id}')" aria-label="Delete account" style="border:none;background:none;cursor:pointer;padding:6px;color:var(--ink-faint)">${icon('trash',15)}</button>
+      </div>
+      <div class="flex-gap" style="align-items:flex-end">
+        <div style="flex:1"><label class="fl">Balance (\u20B9)</label><input type="number" step="1" value="${bal[a.id]}" onchange="setAccountBalance('${a.id}', this.value)"/></div>
+        ${isDef ? `<span class="pill" style="background:var(--saving-tint);color:var(--saving);margin-bottom:12px">Used for new entries</span>` : `<button class="btn-ghost" style="padding:0 12px;height:40px;font-size:12.5px" onclick="makeDefaultAccount('${a.id}')">Use for new entries</button>`}
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="sheet-backdrop" onclick="closeAccounts()">
+    <div class="sheet" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <p style="font-size:16px;font-weight:700;margin:0">Your accounts</p>
+        <button onclick="closeAccounts()" aria-label="Close" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);padding:4px">${icon('close',18)}</button>
+      </div>
+      <p class="muted" style="margin:0 0 4px">Balances come from your entries. Type your real balance to match it \u2014 the starting balance adjusts to make up the difference.</p>
+      ${rows}
+      <div style="margin-top:16px"><label class="fl">Add an account</label>
+        <div class="flex-gap"><input id="newAcctName" type="text" placeholder="e.g. Credit card, Wallet" style="flex:1"/><input id="newAcctBal" type="number" step="1" placeholder="Balance" style="width:100px"/></div>
+        <p id="acctError" style="font-size:12px;color:var(--danger);margin:8px 0 0;display:none"></p>
+        <button class="btn-primary" style="margin-top:10px" onclick="addAccount()">Add account</button>
       </div>
     </div>
   </div>`;
@@ -799,6 +1001,7 @@ function viewWithdrawSheet() {
       <div style="display:flex;flex-direction:column;gap:12px">
         <div><label class="fl">Amount (\u20B9)</label><input id="wAmount" type="number" min="0" step="1" placeholder="0"/></div>
         <div><label class="fl">Withdraw from which saving?</label><select id="wCategory">${savingCategories().map(c=>`<option value="${esc(c)}">${esc(c)} \u2014 net saved ${fmtINR(netSavedFor(c))}</option>`).join("")}</select></div>
+        <div><label class="fl">Add to which account?</label><select id="wAccount">${accountOptions(DB.goals.defaultAccount)}</select></div>
         <div><label class="fl">Date</label><input id="wDate" type="date" value="${todayIso()}"/></div>
         <div><label class="fl">Note (optional)</label><input id="wNote" type="text" placeholder="e.g. medical expense, needed cash"/></div>
         <p id="wError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
@@ -949,6 +1152,8 @@ function render() {
     </div>
     ${UI.showForm ? viewSheet() : ""}
     ${UI.showWithdraw ? viewWithdrawSheet() : ""}
+    ${UI.showTransfer ? viewTransferSheet() : ""}
+    ${UI.showAccounts ? viewAccountsSheet() : ""}
   `;
   setupSwipeGestures();
 }
@@ -1019,13 +1224,28 @@ function setupSwipeGestures() {
 function setTab(t) { UI.tab = t; render(); window.scrollTo(0, 0); }
 function setListScope(k) { UI.listScope = k; render(); }
 function setHistFilter(k) { UI.histFilter = k; render(); }
-function openForm(type) { UI.formType = type; UI.editingId = null; UI.formSource = "income"; UI.showForm = true; render(); }
+function openForm(type, presetId) {
+  UI.formType = type; UI.editingId = null; UI.formSource = "income";
+  UI.formAccount = acctById(UI.lastAccount) ? UI.lastAccount : DB.goals.defaultAccount;
+  UI.showForm = true; render();
+  if (presetId) applyPreset(presetId);
+}
 function openEdit(id) {
   const t = DB.txns.find(x=>x.id===id);
   if (!t) return;
-  UI.formType = t.type; UI.editingId = id; UI.formSource = t.source === "external" ? "external" : "income"; UI.showForm = true; render();
+  if (t.type === "transfer") { openTransfer(id); return; }
+  UI.formType = t.type; UI.editingId = id; UI.formSource = t.source === "external" ? "external" : "income";
+  UI.formAccount = resolveAcct(t.account);
+  UI.showForm = true; render();
 }
 function closeSheet() { UI.showForm = false; UI.editingId = null; render(); }
+// Rebuilds the parts of the sheet that depend on the type, without touching what you've typed
+function refreshSheetExtras() {
+  const t = UI.formType;
+  document.getElementById("sourceWrap").innerHTML = sourceBlock(t);
+  document.getElementById("accountWrap").innerHTML = accountBlock(t);
+  document.getElementById("presetWrap").innerHTML = presetBlock(t);
+}
 function setSheetType(t) {
   UI.formType = t;
   document.getElementById("fCategory").innerHTML = catsFor(t).map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
@@ -1035,15 +1255,8 @@ function setSheetType(t) {
     if (types[i]===t) { btn.classList.add("on"); btn.style.background=m.tint; btn.style.color=m.color; }
     else { btn.classList.remove("on"); btn.style.background=""; btn.style.color=""; }
   });
-  document.getElementById("sourceWrap").innerHTML = t === "saving" ? `<div>
-    <label class="fl">Where did this money come from?</label>
-    <div class="flex-gap" id="sourceButtons">
-      <button type="button" class="srcbtn on-income" onclick="setSheetSource('income')">From cash in hand</button>
-      <button type="button" class="srcbtn" onclick="setSheetSource('external')">Outside income</button>
-    </div>
-    <p id="sourceHint" style="font-size:11px;color:var(--ink-faint);margin:6px 0 0">Will reduce your cash in hand, since this money is coming out of income you've already logged.</p>
-  </div>` : "";
   UI.formSource = "income";
+  refreshSheetExtras();
 }
 function setSheetSource(s) {
   UI.formSource = s;
@@ -1051,8 +1264,22 @@ function setSheetSource(s) {
     btn.className = "srcbtn " + (i===0 ? (s==="income"?"on-income":"") : (s==="external"?"on-external":""));
   });
   document.getElementById("sourceHint").textContent = s === "external"
-    ? "Won't reduce your cash in hand — use this for side-hustle earnings or money invested directly, that never sat in your account as tracked income."
+    ? "Won't reduce your cash in hand \u2014 use this for side-hustle earnings or money invested directly, that never sat in your account as tracked income."
     : "Will reduce your cash in hand, since this money is coming out of income you've already logged.";
+  document.getElementById("accountWrap").innerHTML = accountBlock(UI.formType);
+}
+// One-tap quick fill from a saved preset
+function applyPreset(id) {
+  const p = DB.goals.presets.find(x => x.id === id);
+  if (!p) return;
+  if (UI.formType !== p.type) setSheetType(p.type);
+  const amt = document.getElementById("fAmount"); if (amt) amt.value = p.amount;
+  const note = document.getElementById("fNote"); if (note) note.value = p.label;
+  const sel = document.getElementById("fCategory");
+  if (sel) {
+    if (!Array.from(sel.options || []).some(o => o.value === p.category)) sel.insertAdjacentHTML("beforeend", `<option value="${esc(p.category)}">${esc(p.category)}</option>`);
+    sel.value = p.category;
+  }
 }
 function submitSheet() {
   const amount = Number(document.getElementById("fAmount").value);
@@ -1064,12 +1291,148 @@ function submitSheet() {
   if (!date) { err.textContent = "Pick a date."; err.style.display="block"; return; }
   const entry = { type: UI.formType, amount, category, date, note };
   if (UI.formType === "saving") entry.source = UI.formSource;
+  if (sheetNeedsAccount(UI.formType)) { entry.account = resolveAcct(UI.formAccount); UI.lastAccount = entry.account; }
   if (UI.editingId) updateTxn(UI.editingId, entry);
   else addTxn(entry);
   UI.showForm = false; UI.editingId = null;
   render();
 }
 function doDeleteTxn() { if (!confirm("Delete this entry? This can't be undone.")) return; if (UI.editingId) deleteTxn(UI.editingId); UI.showForm=false; UI.editingId=null; render(); }
+
+// ---- transfers ----
+function openTransfer(id) {
+  if (DB.goals.accounts.length < 2) { alert("Add a second account first (for example Cash and Bank / UPI) so you can move money between them."); openAccounts(); return; }
+  UI.editingTransferId = id || null; UI.showTransfer = true; render();
+}
+function closeTransfer() { UI.showTransfer = false; UI.editingTransferId = null; render(); }
+function submitTransfer() {
+  const from = document.getElementById("tFrom").value, to = document.getElementById("tTo").value;
+  const amount = Number(document.getElementById("tAmount").value);
+  const date = document.getElementById("tDate").value;
+  const note = document.getElementById("tNote").value.trim();
+  const err = document.getElementById("tError");
+  if (from === to) { err.textContent = "Pick two different accounts."; err.style.display = "block"; return; }
+  if (!amount || amount <= 0) { err.textContent = "Enter an amount greater than 0."; err.style.display = "block"; return; }
+  if (!date) { err.textContent = "Pick a date."; err.style.display = "block"; return; }
+  const entry = { type: "transfer", amount, category: "Transfer", from, to, date, note };
+  if (UI.editingTransferId) updateTxn(UI.editingTransferId, entry); else addTxn(entry);
+  UI.lastAccount = to;
+  UI.showTransfer = false; UI.editingTransferId = null; render();
+}
+function deleteTransfer() {
+  if (!confirm("Delete this transfer?")) return;
+  if (UI.editingTransferId) deleteTxn(UI.editingTransferId);
+  UI.showTransfer = false; UI.editingTransferId = null; render();
+}
+
+// ---- accounts ----
+function openAccounts() { UI.showAccounts = true; render(); }
+function closeAccounts() { UI.showAccounts = false; render(); }
+function acctNameTaken(name, exceptId) {
+  const n = name.trim().toLowerCase();
+  return DB.goals.accounts.some(a => a.id !== exceptId && a.name.toLowerCase() === n);
+}
+function renameAccount(id, value) {
+  const a = acctById(id); const name = value.trim();
+  if (!a || name === a.name) { render(); return; }
+  if (!name || acctNameTaken(name, id)) { alert(!name ? "An account needs a name." : "You already have an account with that name."); render(); return; }
+  a.name = name; saveDB(); render();
+}
+// Typing your real balance adjusts the account's starting balance so everything lines up
+function setAccountBalance(id, value) {
+  const a = acctById(id); const v = Number(value);
+  if (!a || value === "" || isNaN(v)) { render(); return; }
+  a.opening = (a.opening || 0) + (v - accountBalances()[id]);
+  saveDB(); render();
+}
+function makeDefaultAccount(id) { DB.goals.defaultAccount = id; saveDB(); render(); }
+function addAccount() {
+  const name = document.getElementById("newAcctName").value.trim();
+  const bal = Number(document.getElementById("newAcctBal").value) || 0;
+  const err = document.getElementById("acctError");
+  if (!name) { err.textContent = "Give the account a name."; err.style.display = "block"; return; }
+  if (acctNameTaken(name)) { err.textContent = "You already have an account with that name."; err.style.display = "block"; return; }
+  DB.goals.accounts.push({ id: uid(), name, opening: bal });
+  saveDB(); render();
+}
+// Deleting moves its entries and starting balance into your default account, so no money disappears
+function deleteAccount(id) {
+  const accts = DB.goals.accounts;
+  if (accts.length <= 1) { alert("You need at least one account."); return; }
+  const a = acctById(id); if (!a) return;
+  const others = accts.filter(x => x.id !== id);
+  const target = id === DB.goals.defaultAccount ? others[0] : acctById(DB.goals.defaultAccount);
+  if (!confirm(`Delete "${a.name}"? Its entries and balance move to "${target.name}".`)) return;
+  target.opening = (target.opening || 0) + (a.opening || 0);
+  DB.txns.forEach(t => { if (t.account === id) t.account = target.id; if (t.from === id) t.from = target.id; if (t.to === id) t.to = target.id; });
+  DB.txns = DB.txns.filter(t => !(t.type === "transfer" && resolveAcct(t.from) === resolveAcct(t.to)));
+  DB.recurring.forEach(r => { if (r.account === id) r.account = target.id; });
+  DB.goals.accounts = others;
+  if (DB.goals.defaultAccount === id) DB.goals.defaultAccount = target.id;
+  if (UI.lastAccount === id) UI.lastAccount = null;
+  saveDB(); render();
+}
+
+// ---- custom categories ----
+function catListFor(type) { return type === "income" ? DB.goals.incomeCats : DB.goals.expenseCats; }
+function catNameTaken(type, name, exceptIdx) {
+  const n = name.trim().toLowerCase();
+  if (n === CLEARANCE_CATEGORY.toLowerCase()) return true;
+  return catListFor(type).some((c, i) => i !== exceptIdx && c.toLowerCase() === n);
+}
+function setCatTab(k) { UI.catTab = k; render(); }
+function addCategory() {
+  const type = UI.catTab; const name = document.getElementById("newCatName").value.trim();
+  if (!name) return;
+  if (catNameTaken(type, name, -1)) { alert("That category already exists."); return; }
+  catListFor(type).push(name); saveDB(); render();
+}
+// Renaming also updates past entries, presets, recurring items and budgets
+function renameCategory(type, idx, value) {
+  const list = catListFor(type); const old = list[idx]; const name = value.trim();
+  if (old === undefined || name === old) { render(); return; }
+  if (LOCKED_CATS[type].includes(old)) { alert("This category is built in and can't be renamed."); render(); return; }
+  if (!name || catNameTaken(type, name, idx)) { alert(!name ? "A category needs a name." : "That category already exists."); render(); return; }
+  list[idx] = name;
+  DB.txns.forEach(t => { if (t.type === type && t.category === old) t.category = name; });
+  DB.recurring.forEach(r => { if (r.type === type && r.category === old) r.category = name; });
+  DB.goals.presets.forEach(p => { if (p.type === type && p.category === old) p.category = name; });
+  const b = DB.goals.monthlyBudgets;
+  if (type === "expense" && b && Object.prototype.hasOwnProperty.call(b, old)) { b[name] = b[old]; delete b[old]; }
+  saveDB(); render();
+}
+function deleteCategory(type, idx) {
+  const list = catListFor(type); const name = list[idx];
+  if (name === undefined || LOCKED_CATS[type].includes(name)) return;
+  const n = DB.txns.filter(t => t.type === type && t.category === name).length;
+  if (!confirm(n ? `Delete "${name}"? Its ${n} entr${n === 1 ? "y" : "ies"} will move to "Other".` : `Delete "${name}"?`)) return;
+  DB.txns.forEach(t => { if (t.type === type && t.category === name) t.category = "Other"; });
+  DB.recurring.forEach(r => { if (r.type === type && r.category === name) r.category = "Other"; });
+  DB.goals.presets.forEach(p => { if (p.type === type && p.category === name) p.category = "Other"; });
+  if (type === "expense" && DB.goals.monthlyBudgets) delete DB.goals.monthlyBudgets[name];
+  list.splice(idx, 1);
+  saveDB(); render();
+}
+
+// ---- quick presets ----
+function openPresetForm() { UI.presetFormOpen = true; render(); }
+function closePresetForm() { UI.presetFormOpen = false; render(); }
+function refreshPresetCats() {
+  const type = document.getElementById("presetType").value;
+  document.getElementById("presetCategory").innerHTML = catsFor(type).map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+}
+function submitPreset() {
+  const label = document.getElementById("presetLabel").value.trim();
+  const amount = Number(document.getElementById("presetAmount").value);
+  const type = document.getElementById("presetType").value;
+  const category = document.getElementById("presetCategory").value;
+  const err = document.getElementById("presetError");
+  if (!label) { err.textContent = "Give the preset a name."; err.style.display = "block"; return; }
+  if (!amount || amount <= 0) { err.textContent = "Enter an amount greater than 0."; err.style.display = "block"; return; }
+  DB.goals.presets.push({ id: uid(), label, amount, type, category });
+  UI.presetFormOpen = false; saveDB(); render();
+}
+function deletePreset(id) { DB.goals.presets = DB.goals.presets.filter(p => p.id !== id); saveDB(); render(); }
 
 function openWithdraw() { UI.showWithdraw = true; render(); }
 function closeWithdraw() { UI.showWithdraw = false; render(); }
@@ -1082,7 +1445,7 @@ function submitWithdraw() {
   if (!amount || amount<=0) { err.textContent = "Enter an amount greater than 0."; err.style.display="block"; return; }
   const available = netSavedFor(category);
   if (amount > available) { err.textContent = `You've only got ${fmtINR(available)} net saved in this category.`; err.style.display="block"; return; }
-  addTxn({ type: "withdrawal", amount, category, date, note });
+  addTxn({ type: "withdrawal", amount, category, date, note, account: document.getElementById("wAccount").value });
   UI.showWithdraw = false;
   render();
 }
@@ -1095,11 +1458,12 @@ function saveSalary() {
 function logSalaryThisMonth() {
   const amt = Number(document.getElementById("salaryInput").value) || DB.goals.monthlySalary || 0;
   if (amt<=0) return;
-  addTxn({ type:"income", amount:amt, category:"Salary", date:todayIso(), note:"Monthly salary" });
+  addTxn({ type:"income", amount:amt, category:"Salary", date:todayIso(), note:"Monthly salary", account: DB.goals.defaultAccount });
   render();
 }
 
-function onBudgetChange(cat, val) {
+function onBudgetChange(ci, val) {
+  const cat = expenseCategories()[ci]; if (!cat) return;
   const budgets = { ...(DB.goals.monthlyBudgets||{}) };
   budgets[cat] = Number(val)||0;
   saveGoalsPatch({ monthlyBudgets: budgets });
@@ -1164,14 +1528,19 @@ function submitRecurring() {
   if (!day || day<1 || day>31) { err.textContent="Day should be between 1 and 31."; err.style.display="block"; return; }
   const entry = { type: UI.recFormType||"expense", amount, category, day, note };
   if (entry.type === "saving") entry.source = UI.recSource || "income";
+  const ra = document.getElementById("recAccount"); if (ra) entry.account = ra.value;
   addRecurring(entry);
   UI.recurringOpen = false;
   render();
 }
 
 function exportCsv() {
-  const header = "date,type,category,amount,source,note";
-  const rows = DB.txns.map(t => [t.date, t.type, `"${t.category}"`, t.amount, t.source||"", `"${(t.note||"").replace(/"/g,'""')}"`].join(","));
+  const header = "date,type,category,amount,source,account,note";
+  const q = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+  const rows = DB.txns.map(t => {
+    const acct = t.type === "transfer" ? acctName(t.from) + " -> " + acctName(t.to) : (accountEffects(t).length ? acctName(t.account) : "");
+    return [t.date, t.type, q(t.category), t.amount, t.source || "", q(acct), q(t.note)].join(",");
+  });
   const csv = [header, ...rows].join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
