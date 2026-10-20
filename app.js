@@ -15,7 +15,7 @@ const LOCKED_CATS = { expense: ["Other", LOAN_INTEREST_CATEGORY], income: ["Sala
 const CATS_INCOME = ["Salary","Freelance","Bonus","Interest","Gift","Other"];
 const TAX_80C_LIMIT = 150000;
 const GITHUB_REPO = "https://github.com/naveen-yonko/Pennylogv2.1";
-const APP_VERSION = "2.4";
+const APP_VERSION = "2.5";
 const CONTACT_EMAIL = "naveen2992005@gmail.com"; // shown on the About page
 
 const TYPE_META = {
@@ -76,10 +76,11 @@ function catsFor(type) { return type === "income" ? incomeCategories() : type ==
 /* ==================== helpers ==================== */
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 function fmtINR(n) {
-  const v = Number(n || 0);
+  const v = Math.round(Number(n || 0)) || 0; // whole rupees; also avoids "-0"
   const sign = v < 0 ? "\u2212" : "";
   return sign + "\u20B9" + Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 });
 }
+function round2(x) { return Math.round(x * 100) / 100; } // keeps floating-point dust out of balances
 function fmtDateShort(iso) { const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }); }
 function monthKey(iso) { return iso.slice(0, 7); }
 // Local-time dates (toISOString is UTC, which put entries on the wrong day for IST after midnight)
@@ -111,6 +112,7 @@ function accountBalances(excludeId) {
   const bal = {};
   DB.goals.accounts.forEach(a => { bal[a.id] = a.opening || 0; });
   DB.txns.forEach(t => { if (t.id !== excludeId) accountEffects(t).forEach(([id, d]) => { bal[id] += d; }); });
+  Object.keys(bal).forEach(k => { bal[k] = round2(bal[k]); });
   return bal;
 }
 // Warning text when paying `outflow` from an account would push it below zero ("" if fine)
@@ -139,7 +141,7 @@ function fyRange(now) {
   const y = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
   return { start: new Date(y,3,1), end: new Date(y+1,2,31,23,59,59), label: `FY ${y}-${String(y+1).slice(2)}` };
 }
-function inRange(iso, r) { const d = new Date(iso); return d >= r.start && d <= r.end; }
+function inRange(iso, r) { const d = new Date(iso + "T00:00:00"); return d >= r.start && d <= r.end; }
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
 
 /* ==================== storage ==================== */
@@ -179,33 +181,43 @@ function saveLocalDB() { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 let DB = normalizeDB(loadLocalDB());
 let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
 let AUTH = { user: null, ready: false, mode: "login", error: "", syncState: "offline" };
-let suppressNextSnapshotEcho = false;
+
+const OWNER_KEY = "pennylog-owner";
+let unsubscribeSnap = null;
+// Firestore rejects `undefined` values, so always send a clean copy
+function cloudCopy() { return JSON.parse(JSON.stringify(DB)); }
 
 function saveDB() {
   saveLocalDB();
   if (AUTH.user && window.__fb) {
-    const { dbFs, doc, setDoc } = window.__fb;
-    suppressNextSnapshotEcho = true;
-    setDoc(doc(dbFs, "pennylog", AUTH.user.uid), DB).then(() => {
-      AUTH.syncState = "synced"; render();
-    }).catch(() => { AUTH.syncState = "error"; render(); });
+    try {
+      const { dbFs, doc, setDoc } = window.__fb;
+      setDoc(doc(dbFs, "pennylog", AUTH.user.uid), cloudCopy()).then(() => {
+        AUTH.syncState = "synced"; render();
+      }).catch(() => { AUTH.syncState = "error"; render(); });
+    } catch (e) { AUTH.syncState = "error"; }
   }
 }
 
 /* ==================== firebase auth wiring ==================== */
 window.onAuthChange = function (user) {
+  if (unsubscribeSnap) { unsubscribeSnap(); unsubscribeSnap = null; } // never keep two listeners
   AUTH.user = user;
   AUTH.ready = true;
   if (user && window.__fb) {
+    // Never mix accounts: if someone else used this device before, start clean for this account
+    const owner = localStorage.getItem(OWNER_KEY);
+    if (owner && owner !== user.uid) { DB = normalizeDB(emptyDB()); saveLocalDB(); }
+    localStorage.setItem(OWNER_KEY, user.uid);
     const { dbFs, doc, onSnapshot } = window.__fb;
-    onSnapshot(doc(dbFs, "pennylog", user.uid), (snap) => {
-      if (suppressNextSnapshotEcho) { suppressNextSnapshotEcho = false; AUTH.syncState = "synced"; render(); return; }
+    unsubscribeSnap = onSnapshot(doc(dbFs, "pennylog", user.uid), (snap) => {
+      if (snap.metadata && snap.metadata.hasPendingWrites) return; // that is just our own save echoing back
       if (snap.exists()) {
         const data = snap.data();
         DB = normalizeDB({ txns: data.txns || [], goals: data.goals || emptyDB().goals, recurring: data.recurring || [] });
         saveLocalDB();
       } else {
-        window.__fb.setDoc(doc(dbFs, "pennylog", user.uid), DB);
+        window.__fb.setDoc(doc(dbFs, "pennylog", user.uid), cloudCopy());
       }
       AUTH.syncState = "synced";
       render();
@@ -226,7 +238,7 @@ function computeStats() {
   const totalSavingExternal = totalSavingRaw - totalSavingFromCash;
   const totalWithdrawn = txns.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
   const totalSaving = totalSavingRaw - totalWithdrawn; // net currently saved
-  const cashInHand = openingTotal() + txns.reduce((sum, t) => sum + cashEffect(t), 0);
+  const cashInHand = round2(openingTotal() + txns.reduce((sum, t) => sum + cashEffect(t), 0));
 
   const monthTxns = txns.filter(t=>monthKey(t.date)===thisMonth);
   const monthIncome = monthTxns.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
@@ -243,8 +255,8 @@ function computeStats() {
   const monthRepaid = monthTxns.filter(t=>t.type==="repay").reduce((s,t)=>s+t.amount,0);
   // Left over = carried-forward surplus + income - spent (incl. shortfall cleared) - saved + withdrawn
   const openingBalance = curM.opening;
-  const monthLeftover = monthIncome - monthExpense - monthSavingFromCash + monthWithdrawn + monthBorrowed - monthRepaid;
-  const leftover = curM.carry + monthLeftover;
+  const monthLeftover = round2(monthIncome - monthExpense - monthSavingFromCash + monthWithdrawn + monthBorrowed - monthRepaid);
+  const leftover = round2(curM.carry + monthLeftover);
 
   const byCat = {};
   monthTxns.filter(t=>t.type==="expense").forEach(t=>{ byCat[t.category]=(byCat[t.category]||0)+t.amount; });
@@ -267,7 +279,7 @@ function computeStats() {
   for (let i=5;i>=0;i--) {
     const key = monthKeyOffset(-i);
     // month-end balance = everything up to and including that month
-    const closing = openingTotal() + txns.filter(t=>monthKey(t.date)<=key).reduce((s,t)=>s+cashEffect(t),0);
+    const closing = round2(openingTotal() + txns.filter(t=>monthKey(t.date)<=key).reduce((s,t)=>s+cashEffect(t),0));
     months.push({ key, leftover: closing });
   }
   const fy = fyRange();
@@ -316,7 +328,7 @@ function buildLedger() {
     const first = prevKey === null;
     const clearance = first ? 0 : Math.max(0, -opening);
     const carry = first ? opening : Math.max(0, opening);
-    const closing = opening + income - expense - saved + withdrawn + borrowed - repaid;
+    const closing = round2(opening + income - expense - saved + withdrawn + borrowed - repaid);
     running = closing;
     const rows = sortTxns(mt);
     if (clearance > 0 && prevKey) rows.push(autoEntry(key, prevKey, clearance));
@@ -512,10 +524,11 @@ function safeToSpendCard(stats) {
   const loanDue = DB.goals.loans.filter(l => l.status !== "closed").reduce((sum, l) => sum + loanStats(l).interestDue, 0);
   const pendingAll = pendingOut + loanDue; // recurring bills + loan interest you already owe
   const safe = stats.leftover - pendingAll;
-  const rate = stats.monthIncome > 0 ? Math.round((stats.monthSaving / stats.monthIncome) * 100) : null;
+  const rate = stats.monthIncome > 0 ? Math.round((stats.monthSavingFromCash / stats.monthIncome) * 100) : null; // saved out of income
   let main;
   if (safe > 0) main = `<span class="num" style="font-size:20px;font-weight:700">${fmtINR(Math.floor(safe / daysLeft))}</span><span style="font-size:12px;color:var(--ink-soft)"> per day for the next ${daysLeft} day${daysLeft===1?"":"s"}</span>`;
-  else main = `<span class="num" style="font-size:20px;font-weight:700;color:var(--danger)">${fmtINR(safe)}</span><span style="font-size:12px;color:var(--ink-soft)"> \u2014 over by this much; it will show as "Previous balance" in next month's spending</span>`;
+  else if (stats.leftover < 0) main = `<span class="num" style="font-size:20px;font-weight:700;color:var(--danger)">${fmtINR(stats.leftover)}</span><span style="font-size:12px;color:var(--ink-soft)"> \u2014 you're below zero; it will show as "Previous balance" in next month's spending</span>`;
+  else main = `<span class="num" style="font-size:20px;font-weight:700;color:var(--danger)">${fmtINR(Math.abs(safe))} short</span><span style="font-size:12px;color:var(--ink-soft)"> \u2014 the bills still due are more than what you have left</span>`;
   const sub = [];
   if (pendingAll > 0) sub.push(`after ${fmtINR(pendingAll)} of bills and loan interest still due`);
   if (rate !== null) sub.push(`savings rate ${rate}%`);
@@ -743,8 +756,22 @@ function viewGoals(stats) {
 
   html += `<button class="btn-ghost" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-bottom:14px" onclick="exportCsv()">${icon('download',15)} Export all data (CSV)</button>`;
 
+  html += viewDataCard();
   html += viewAccountCard();
   return html;
+}
+
+function viewDataCard() {
+  return `<div class="card">${sectionLabel("Backup & reset","download")}
+    <p class="muted" style="margin:0 0 12px">Keep a copy of everything, or start over from a clean slate.</p>
+    <div class="flex-gap" style="margin-bottom:10px">
+      <button class="btn-ghost" style="flex:1;padding:10px 6px;font-size:12.5px" onclick="exportBackup()">Download backup</button>
+      <button class="btn-ghost" style="flex:1;padding:10px 6px;font-size:12.5px" onclick="document.getElementById('restoreFile').click()">Restore backup</button>
+      <input id="restoreFile" type="file" accept=".json,application/json" style="display:none" onchange="onRestoreFile(this)"/>
+    </div>
+    <button class="btn-ghost" style="width:100%;color:var(--danger);border-color:var(--danger);font-size:13px;padding:10px" onclick="clearAllData()">Clear all data</button>
+    <p style="font-size:11px;color:var(--ink-faint);margin:6px 0 0">Deletes every entry, loan, account, goal and setting on all your devices. Download a backup first.</p>
+  </div>`;
 }
 
 function viewAccountCard() {
@@ -1431,7 +1458,15 @@ function doForgotPassword() {
     render();
   }).catch((e) => { AUTH.error = friendlyAuthError(e.code); render(); });
 }
-function doSignOut() { window.__fb.signOut(window.__fb.auth); }
+function doSignOut() {
+  if (AUTH.syncState !== "synced" && !confirm("Some changes may not have synced yet. Sign out anyway?")) return;
+  if (unsubscribeSnap) { unsubscribeSnap(); unsubscribeSnap = null; }
+  // leave nothing behind on a shared device
+  DB = normalizeDB(emptyDB());
+  localStorage.removeItem(STORE_KEY); localStorage.removeItem(OWNER_KEY);
+  UI.tab = "home"; UI.showForm = false; UI.showWithdraw = false; UI.showTransfer = false; UI.showAccounts = false; UI.showLoanForm = false; UI.loanPay = null; UI.mobileMenuOpen = false;
+  window.__fb.signOut(window.__fb.auth);
+}
 
 /* ==================== actions ==================== */
 function openMobileMenu() { UI.mobileMenuOpen = true; renderDrawerOnly(); }
@@ -1897,6 +1932,49 @@ function exportCsv() {
   a.href = url; a.download = `pennylog-${todayIso()}.csv`;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// ---- backup, restore, reset ----
+function buildBackup() { return JSON.stringify({ app: "PennyLog", version: APP_VERSION, exportedAt: new Date().toISOString(), data: cloudCopy() }, null, 2); }
+function exportBackup() {
+  const blob = new Blob([buildBackup()], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `pennylog-backup-${todayIso()}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+const VALID_TYPES = ["income", "expense", "saving", "withdrawal", "transfer", "borrow", "repay"];
+// Returns { ok, message, count }; replaces the current data only when the file looks right
+function restoreFromText(text) {
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (e) { return { ok: false, message: "That file isn't a valid PennyLog backup." }; }
+  const d = parsed && parsed.data ? parsed.data : parsed;
+  if (!d || !Array.isArray(d.txns) || typeof d.goals !== "object" || d.goals === null) return { ok: false, message: "That file isn't a valid PennyLog backup." };
+  const bad = d.txns.find(t => !t || typeof t.id !== "string" || !VALID_TYPES.includes(t.type) || !isFinite(t.amount) || !/^\d{4}-\d{2}-\d{2}$/.test(t.date || ""));
+  if (bad) return { ok: false, message: "This backup has a damaged entry, so nothing was changed." };
+  DB = normalizeDB({ txns: d.txns, goals: d.goals, recurring: Array.isArray(d.recurring) ? d.recurring : [] });
+  saveDB();
+  return { ok: true, message: "Backup restored.", count: d.txns.length };
+}
+function onRestoreFile(input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    if (!confirm("Replace ALL your current data with this backup?")) { input.value = ""; return; }
+    const r = restoreFromText(String(reader.result));
+    alert(r.ok ? `${r.message} ${r.count} entries loaded.` : r.message);
+    input.value = ""; render();
+  };
+  reader.readAsText(f);
+}
+function clearAllData() {
+  if (!confirm("Delete ALL your data? Every entry, loan, account, goal and setting is erased on every device. This can't be undone. (Tap Cancel and use Download backup first if you might want it back.)")) return;
+  const typed = prompt("To confirm, type DELETE");
+  if (!typed || typed.trim().toUpperCase() !== "DELETE") { alert("Nothing was deleted."); return; }
+  DB = normalizeDB(emptyDB());
+  UI.tab = "home"; UI.showForm = false; UI.showWithdraw = false; UI.showTransfer = false; UI.showAccounts = false; UI.showLoanForm = false; UI.loanPay = null; UI.editingId = null; UI.loanOpenId = null;
+  saveDB(); render();
 }
 
 /* ==================== init ==================== */
