@@ -1,0 +1,658 @@
+// PennyLog regression tests. Run:  node tests.js   (no install needed; it stubs the browser)
+// It loads app.js, pretends today is 12 Oct 2026, and checks the money logic and every page.
+const fs = require("fs");
+const path = require("path");
+const store = {};
+global.localStorage = { getItem: k => store[k] || null, setItem: (k, v) => { store[k] = v; }, removeItem: k => { delete store[k]; }, clear: () => { for (const k of Object.keys(store)) delete store[k]; } };
+let sessionCleared = 0; global.sessionStorage = { clear() { sessionCleared++; } };
+const root = { innerHTML: "" };
+const els = {};
+const mk = (v = "") => ({ value: v, style: {}, textContent: "", innerHTML: "", options: [], insertAdjacentHTML() {}, classList: { add() {}, remove() {} } });
+global.document = { getElementById: (id) => els[id] || (id === "root" ? root : mk()), querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, createElement: () => ({}), body: {} };
+global.window = global; global.window.scrollTo = () => {};
+global.navigator = {};
+let CONFIRM = true; global.confirm = () => CONFIRM;
+let PROMPT = "DELETE"; global.prompt = () => PROMPT;
+let lastAlert = ""; global.alert = (m) => { lastAlert = m; };
+const RealDate = Date;
+global.Date = class extends RealDate { constructor(...a) { if (a.length) super(...a); else super("2026-10-12T11:00:00"); } static now() { return new RealDate("2026-10-12T11:00:00").getTime(); } };
+eval(fs.readFileSync(path.join(__dirname, "app.js"), "utf8") + `
+;global.__t = { get DB(){return DB;}, setDB:(d)=>{DB=normalizeDB(d);}, UI, AUTH, computeStats, buildLedger, viewHome, viewHistory, viewList, viewIncome, viewGoals, viewSheet, viewTransferSheet, viewAccountsSheet, viewCategoriesCard, viewPresetsCard, viewAbout, viewLoans, viewLoanSheet, viewLoanPaySheet, homeLoansCard, safeToSpendCard, reconcileCard, render, accountBalances, openingTotal, acctName, savingCategories, catsFor, submitSheet, submitTransfer, openTransfer, openForm, openEdit, applyPreset, setSheetType, setSheetSource, submitPreset, deletePreset, addCategory, renameCategory, deleteCategory, addAccount, renameAccount, setAccountBalance, deleteAccount, makeDefaultAccount, setAccountCredit, logRecurring, doLogRecurring, exportCsv, onBudgetChange, submitWithdraw, viewWithdrawSheet, normalizeDB, txnRow, quickChips, setCatTab, viewTxns, submitGoal, renameGoal, deleteGoal, setGoalField, goalNameTaken, monthsUntil, goalCaption, loanStats, loanSuggestions, loanById, addMonthsIso, refreshLoanStatus, submitLoan, submitLoanPay, openLoanPay, undoLoanTxn, deleteLoan, overdrawMessage, updateCloseTotal, toggleLoanActivity, doSignOut, openLoans, openDebts, openLends, isLend, setLoanView, openLoanForm, doGoogleSignIn, friendlyAuthError, resetThisDevice, viewAuth, clearAllData, buildBackup, restoreFromText, fmtINR, inRange, fyRange, round2, saveDB:()=>{} };`);
+const t = global.__t;
+let fails = 0, passes = 0;
+const chk = (name, got, want) => { const ok = JSON.stringify(got) === JSON.stringify(want); ok ? passes++ : fails++; console.log((ok ? "PASS" : "FAIL") + "  " + name + (ok ? "" : "  -> got " + JSON.stringify(got) + ", wanted " + JSON.stringify(want))); };
+let id = 0; const tx = (type, amount, category, date, extra = {}) => ({ id: "i" + (id++), type, amount, category, date, note: "", ...extra });
+t.AUTH.user = { email: "a@b.c" }; t.AUTH.ready = true;
+
+{
+console.log('=== Part 1: ledger, goals, previous-balance expense ===');
+
+console.log("--- A. your exact case: Sept deficit, Oct salary ---");
+t.setDB({ goals:{monthlyBudgets:{},sportsTarget:200000,monthlySalary:20000}, recurring:[], txns:[
+  tx("income",14124,"Salary","2026-09-05"), tx("expense",13300,"Food","2026-09-20"),
+  tx("saving",2000,"Sports fund (Hyrox/IRONMAN)","2026-09-25",{source:"income"}),
+  tx("income",20000,"Salary","2026-10-07") ]});
+let s = t.computeStats();
+chk("cash in hand unchanged", s.cashInHand, 18824);
+chk("spent this month now includes the 1,176 clearance", s.monthExpense, 1176);
+chk("clearance amount", s.monthClearance, 1176);
+chk("left over = cash in hand", s.leftover, 18824);
+chk("top-spending has 'Previous balance' 1,176", s.byCat["Previous balance"], 1176);
+const spend = t.viewList("expense","x");
+chk("Spend page lists 'Previous balance'", spend.includes("Previous balance"), true);
+chk("...as automatic, read-only (Auto pill, no edit click)", spend.includes(">Auto<") && !spend.includes("openEdit('auto-"), true);
+chk("Sept 'spent' unaffected (13,300, no clearance)", t.buildLedger()[1].spent, 13300);
+
+console.log("--- B. withdraw from savings, then spend ---");
+t.DB.txns.unshift(tx("withdrawal",5000,"Sports fund (Hyrox/IRONMAN)","2026-10-10"));
+t.DB.txns.unshift(tx("expense",3000,"Food","2026-10-11"));
+s = t.computeStats();
+chk("spent = 3,000 real + 1,176 clearance", s.monthExpense, 4176);
+chk("cash = 18,824 + 5,000 - 3,000", s.cashInHand, 20824);
+chk("left over matches cash", s.leftover, 20824);
+chk("withdrawn shown", s.monthWithdrawn, 5000);
+
+console.log("--- C. surplus month carries forward (no expense) ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",10000,"Salary","2026-09-05"), tx("expense",4000,"Food","2026-09-10"), tx("income",20000,"Salary","2026-10-05") ]});
+s = t.computeStats();
+chk("no clearance", s.monthClearance, 0);
+chk("carry = 6,000", s.openingCarry, 6000);
+chk("left over = 26,000", s.leftover, 26000);
+chk("spent = 0", s.monthExpense, 0);
+chk("History shows 'Balance brought forward'", t.viewHistory().includes("Balance brought forward"), true);
+
+console.log("--- D. two deficit months in a row ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",1000,"Salary","2026-08-05"), tx("expense",1500,"Food","2026-08-10"), tx("expense",676,"Food","2026-09-10"), tx("income",20000,"Salary","2026-10-05") ]});
+const L = t.buildLedger();
+chk("Aug closing -500", L[2].closing, -500);
+chk("Sept clearance 500", L[1].clearance, 500);
+chk("Sept closing -1,176", L[1].closing, -1176);
+chk("Oct clearance 1,176", L[0].clearance, 1176);
+chk("Oct left over = 18,824", t.computeStats().leftover, 18824);
+chk("cash = left over", t.computeStats().cashInHand, t.computeStats().leftover);
+
+console.log("--- E. goals: migration + customizing ---");
+t.setDB({ goals:{monthlyBudgets:{},sportsTarget:200000}, recurring:[], txns:[ tx("saving",2000,"Sports fund (Hyrox/IRONMAN)","2026-09-25",{source:"income"}) ]});
+chk("legacy sports fund migrated to an editable goal", t.DB.goals.custom.length, 1);
+chk("...with its old target", t.DB.goals.custom[0].target, 200000);
+chk("...and its progress", t.computeStats().goalProgress[0].saved, 2000);
+const again = t.normalizeDB(JSON.parse(JSON.stringify(t.DB)));
+chk("migration does not run twice", again.goals.custom.length, 1);
+els.goalName={value:"Laptop"}; els.goalTarget={value:"60000"}; els.goalDate={value:"2027-03"}; els.goalError={style:{},textContent:""};
+t.submitGoal();
+chk("new goal added", t.DB.goals.custom.length, 2);
+chk("new goal is a savings category", t.savingCategories().includes("Laptop"), true);
+chk("add-saving form offers it", t.viewList("saving","x").length>0 && t.savingCategories().indexOf("Laptop") < t.savingCategories().indexOf("Other"), true);
+chk("duplicate name rejected", t.goalNameTaken("laptop"), true);
+chk("built-in name rejected", t.goalNameTaken("PPF"), true);
+const lap = t.DB.goals.custom.find(g=>g.name==="Laptop");
+t.DB.txns.unshift(tx("saving",10000,"Laptop","2026-10-01",{source:"income"}));
+t.renameGoal(lap.id, "New laptop");
+chk("rename moves past entries too", t.DB.txns.find(x=>x.amount===10000).category, "New laptop");
+chk("renamed goal keeps its progress", t.computeStats().goalProgress.find(g=>g.name==="New laptop").saved, 10000);
+t.DB.txns.unshift(tx("withdrawal",4000,"New laptop","2026-10-02"));
+chk("withdrawal lowers goal progress", t.computeStats().goalProgress.find(g=>g.name==="New laptop").saved, 6000);
+chk("monthly amount needed (to Mar 2027)", t.monthsUntil("2027-03"), 6);
+chk("caption: 54,000 left / 6 months = 9,000/month", t.goalCaption({target:60000,saved:6000,date:"2027-03"}).startsWith("₹9,000/month"), true);
+const hasSports = t.DB.goals.custom.find(g=>g.name==="Sports fund (Hyrox/IRONMAN)");
+t.deleteGoal(hasSports.id);
+chk("deleting a goal does not bring it back on reload", t.normalizeDB(JSON.parse(JSON.stringify(t.DB))).goals.custom.some(g=>g.name==="Sports fund (Hyrox/IRONMAN)"), false);
+chk("past entries of a deleted goal stay selectable", t.savingCategories().includes("Sports fund (Hyrox/IRONMAN)"), true);
+
+console.log("--- F. every page renders ---");
+t.setDB({ goals:{monthlyBudgets:{}}, recurring:[{id:"r1",type:"expense",amount:5000,category:"Rent",day:15,lastLoggedMonth:null}], txns:[ tx("income",14124,"Salary","2026-09-05"), tx("expense",13300,"Food","2026-09-20"), tx("income",20000,"Salary","2026-10-07") ]});
+for (const tab of ["home","income","expenses","savings","history","goals","about"]) { t.UI.tab=tab; root.innerHTML=""; t.render(); chk("render "+tab, root.innerHTML.length>500, true); }
+t.UI.tab="home"; t.render();
+chk("safe-to-spend card shown", root.innerHTML.includes("Safe to spend"), true);
+chk("home goals prompt when none", root.innerHTML.includes("Set up a goal"), true);
+}
+
+{
+console.log('=== Part 2: accounts, transfers, presets, categories ===');
+const setup = () => t.setDB({ goals:{monthlyBudgets:{Food:5000},sportsTarget:200000,monthlySalary:20000}, recurring:[], txns:[
+  tx("income",14124,"Salary","2026-09-05"), tx("expense",13300,"Food","2026-09-20"),
+  tx("saving",2000,"Sports fund (Hyrox/IRONMAN)","2026-09-25",{source:"income"}), tx("income",20000,"Salary","2026-10-07") ]});
+
+console.log("--- A. your existing data after upgrade ---");
+setup();
+chk("two default accounts created", t.DB.goals.accounts.map(a=>a.name), ["Cash","Bank / UPI"]);
+chk("default account is Bank / UPI", t.DB.goals.defaultAccount, "acc-bank");
+let s = t.computeStats();
+chk("cash in hand unchanged", s.cashInHand, 18824);
+chk("left over unchanged", s.leftover, 18824);
+chk("spent incl. previous-balance clearance unchanged", s.monthExpense, 1176);
+let bal = t.accountBalances();
+chk("old entries land in default account (Bank)", bal["acc-bank"], 18824);
+chk("Cash is 0", bal["acc-cash"], 0);
+chk("accounts add up to cash in hand", bal["acc-bank"]+bal["acc-cash"], s.cashInHand);
+chk("default presets seeded", t.DB.goals.presets.length, 4);
+chk("default categories seeded", t.DB.goals.expenseCats.includes("Food") && t.DB.goals.incomeCats.includes("Gift"), true);
+chk("migrated twice = same (deterministic ids)", t.normalizeDB(JSON.parse(JSON.stringify(t.DB))).goals.accounts.map(a=>a.id), ["acc-cash","acc-bank"]);
+
+console.log("--- B. transfer Bank -> Cash ---");
+els.tFrom={value:"acc-bank"}; els.tTo={value:"acc-cash"}; els.tAmount={value:"2000"}; els.tDate={value:"2026-10-12"}; els.tNote={value:"ATM"}; els.tError={style:{},textContent:""};
+t.submitTransfer();
+bal = t.accountBalances(); s = t.computeStats();
+chk("bank -2000", bal["acc-bank"], 16824);
+chk("cash +2000", bal["acc-cash"], 2000);
+chk("total cash in hand unchanged", s.cashInHand, 18824);
+chk("transfer is NOT income/expense", [s.monthIncome, s.monthExpense], [20000, 1176]);
+chk("left over unchanged by transfer", s.leftover, 18824);
+chk("history shows 'Bank / UPI → Cash'", t.viewHistory().includes("Bank / UPI \u2192 Cash"), true);
+chk("Transfers filter chip exists", t.viewHistory().includes("Transfers"), true);
+t.UI.histFilter = "transfer"; chk("transfer filter shows it", t.viewHistory().includes("ATM")||t.viewHistory().includes("Cash"), true);
+t.UI.histFilter = "all";
+els.tFrom={value:"acc-cash"}; els.tTo={value:"acc-cash"}; t.submitTransfer();
+chk("same-account transfer rejected", els.tError.textContent, "Pick two different accounts.");
+
+console.log("--- C. spend from Cash, income into Bank, withdraw into Cash ---");
+t.UI.showForm=true; t.UI.formType="expense"; t.UI.formSource="income"; t.UI.formAccount="acc-cash"; t.UI.editingId=null;
+els.fAmount={value:"150"}; els.fCategory={value:"Food"}; els.fDate={value:"2026-10-12"}; els.fNote={value:"Lunch"}; els.fError={style:{},textContent:""};
+t.submitSheet();
+bal = t.accountBalances();
+chk("lunch paid from Cash", bal["acc-cash"], 1850);
+chk("bank untouched", bal["acc-bank"], 16824);
+chk("cash in hand = 18,674", t.computeStats().cashInHand, 18674);
+chk("remembers last used account", t.UI.lastAccount, "acc-cash");
+t.DB.txns.unshift(tx("withdrawal",1000,"Sports fund (Hyrox/IRONMAN)","2026-10-12",{account:"acc-cash"}));
+chk("withdrawal lands in chosen account", t.accountBalances()["acc-cash"], 2850);
+t.DB.txns.unshift(tx("saving",500,"PPF","2026-10-12",{source:"external"}));
+chk("outside-income saving touches no account", t.accountBalances()["acc-bank"], 16824);
+t.DB.txns.unshift(tx("saving",700,"PPF","2026-10-12",{source:"income",account:"acc-bank"}));
+chk("saving from cash reduces chosen account", t.accountBalances()["acc-bank"], 16124);
+let sum = Object.values(t.accountBalances()).reduce((a,b)=>a+b,0);
+chk("accounts still add up to cash in hand", sum, t.computeStats().cashInHand);
+
+console.log("--- D. manage accounts ---");
+els.newAcctName={value:"Credit card"}; els.newAcctBal={value:"0"}; els.acctError={style:{},textContent:""};
+t.addAccount();
+const cc = t.DB.goals.accounts.find(a=>a.name==="Credit card");
+chk("account added", !!cc, true);
+t.DB.txns.unshift(tx("expense",3000,"Shopping","2026-10-12",{account:cc.id}));
+chk("card goes negative (owed)", t.accountBalances()[cc.id], -3000);
+els.tFrom={value:"acc-bank"}; els.tTo={value:cc.id}; els.tAmount={value:"3000"}; els.tDate={value:"2026-10-12"}; els.tNote={value:"pay card bill"}; t.UI.editingTransferId=null; t.submitTransfer();
+chk("paying the card bill via transfer clears it", t.accountBalances()[cc.id], 0);
+const before = t.computeStats().cashInHand;
+t.setAccountBalance("acc-bank", "10000");
+chk("set balance to match real life", t.accountBalances()["acc-bank"], 10000);
+chk("...cash in hand follows", t.computeStats().cashInHand, before + (10000 - (before - (t.accountBalances()["acc-cash"]+t.accountBalances()[cc.id]))));
+sum = Object.values(t.accountBalances()).reduce((a,b)=>a+b,0);
+chk("accounts still add up after balance edit", sum, t.computeStats().cashInHand);
+chk("left over still matches cash", t.computeStats().leftover, t.computeStats().cashInHand);
+t.renameAccount(cc.id, "HDFC card"); chk("rename works", t.acctName(cc.id), "HDFC card");
+t.renameAccount(cc.id, "cash"); chk("duplicate name rejected", t.acctName(cc.id), "HDFC card");
+const cashBefore = t.computeStats().cashInHand;
+t.deleteAccount(cc.id);
+chk("delete moves entries; total cash unchanged", t.computeStats().cashInHand, cashBefore);
+chk("account removed", t.DB.goals.accounts.some(a=>a.id===cc.id), false);
+sum = Object.values(t.accountBalances()).reduce((a,b)=>a+b,0);
+chk("accounts add up after delete", sum, t.computeStats().cashInHand);
+
+console.log("--- E. quick presets ---");
+els.fAmount=mk(); els.fNote=mk(); els.fCategory=mk(); t.UI.editingId=null; t.openForm("expense","pre-tea");
+chk("openForm with preset doesn't crash and tracks type", t.UI.formType, "expense");
+els.fAmount=mk(); els.fNote=mk(); els.fCategory=mk(); t.applyPreset("pre-tea");
+chk("preset fills amount", els.fAmount.value, 30);
+chk("preset fills note", els.fNote.value, "Tea");
+chk("preset fills category", els.fCategory.value, "Food");
+chk("Spend page shows quick chips", t.viewList("expense","x").includes("Tea \u20B930"), true);
+chk("Income page has no expense chips", t.viewIncome(t.computeStats()).includes("Tea \u20B930"), false);
+els.presetLabel={value:"Salary bonus"}; els.presetAmount={value:"5000"}; els.presetType={value:"income"}; els.presetCategory={value:"Bonus"}; els.presetError={style:{},textContent:""};
+t.submitPreset();
+chk("custom preset added", t.DB.goals.presets.some(p=>p.label==="Salary bonus"&&p.type==="income"), true);
+chk("income chips show it", t.viewIncome(t.computeStats()).includes("Salary bonus"), true);
+t.deletePreset("pre-tea"); chk("preset deleted", t.DB.goals.presets.some(p=>p.id==="pre-tea"), false);
+chk("add-sheet shows presets only for new entries", t.viewSheet().includes("Quick fill"), true);
+
+console.log("--- F. custom categories ---");
+t.UI.catTab="expense"; els.newCatName={value:"Gym"}; t.addCategory();
+chk("expense category added", t.catsFor("expense").includes("Gym"), true);
+chk("shows in add form", t.viewSheet().includes(">Gym<"), true);
+t.addCategory(); chk("duplicate rejected (still one Gym)", t.catsFor("expense").filter(c=>c==="Gym").length, 1);
+t.DB.txns.unshift(tx("expense",800,"Gym","2026-10-12",{account:"acc-bank"}));
+t.DB.goals.monthlyBudgets["Gym"]=1000;
+t.DB.goals.presets.push({id:"p-gym",label:"Gym day",amount:100,type:"expense",category:"Gym"});
+const gi = t.DB.goals.expenseCats.indexOf("Gym");
+t.renameCategory("expense", gi, "Fitness");
+chk("rename updates past entries", t.DB.txns.find(x=>x.amount===800).category, "Fitness");
+chk("rename moves the budget", [t.DB.goals.monthlyBudgets["Fitness"], t.DB.goals.monthlyBudgets["Gym"]], [1000, undefined]);
+chk("rename updates presets", t.DB.goals.presets.find(p=>p.id==="p-gym").category, "Fitness");
+t.renameCategory("expense", t.DB.goals.expenseCats.indexOf("Other"), "Misc"); chk("built-in 'Other' can't be renamed", t.DB.goals.expenseCats.includes("Other"), true);
+t.renameCategory("income", t.DB.goals.incomeCats.indexOf("Salary"), "Pay"); chk("built-in 'Salary' can't be renamed", t.DB.goals.incomeCats.includes("Salary"), true);
+t.renameCategory("expense", t.DB.goals.expenseCats.indexOf("Fitness"), "Previous balance"); chk("reserved name rejected", t.DB.goals.expenseCats.includes("Previous balance"), false);
+t.deleteCategory("expense", t.DB.goals.expenseCats.indexOf("Fitness"));
+chk("delete moves entries to Other", t.DB.txns.find(x=>x.amount===800).category, "Other");
+chk("delete removes it from the list", t.catsFor("expense").includes("Fitness"), false);
+chk("delete removes its budget", "Fitness" in t.DB.goals.monthlyBudgets, false);
+t.deleteCategory("expense", t.DB.goals.expenseCats.indexOf("Other")); chk("can't delete 'Other'", t.catsFor("expense").includes("Other"), true);
+t.DB.goals.expenseCats.push("Mom's gift");
+const gi2 = t.DB.goals.expenseCats.indexOf("Mom's gift");
+t.onBudgetChange(gi2, "700"); chk("budget works for names with apostrophes", t.DB.goals.monthlyBudgets["Mom's gift"], 700);
+chk("Goals page renders budgets via index (no quote in handler)", t.viewGoals(t.computeStats()).includes("onBudgetChange("+gi2+","), true);
+t.DB.txns.unshift(tx("expense",50,"Old category","2026-10-12",{account:"acc-bank"}));
+const oldEntry = t.DB.txns[0]; t.UI.editingId = oldEntry.id; t.UI.formType = "expense";
+chk("editing an entry whose category was removed keeps it selectable", t.viewSheet().includes(">Old category<"), true);
+t.UI.editingId = null;
+
+console.log("--- G. edge cases ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",1000,"Salary","2026-10-05") ] });
+t.DB.goals.accounts[1].opening = 5000;
+let s2 = t.computeStats();
+chk("opening balances count in cash in hand", s2.cashInHand, 6000);
+chk("left over matches cash with an opening balance", s2.leftover, 6000);
+chk("first month shows 'Opening balance' in History", t.viewHistory().includes("Opening balance"), true);
+t.DB.goals.accounts[1].opening = -2000;
+s2 = t.computeStats();
+chk("negative opening balance still reconciles", s2.leftover, s2.cashInHand);
+t.DB.goals.accounts[1].opening = 0;
+t.setDB({ goals:{}, recurring:[{id:"r1",type:"expense",amount:5000,category:"Rent",day:12,lastLoggedMonth:null,account:"acc-cash"}], txns:[ tx("income",20000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+t.logRecurring("r1","2026-10");
+chk("recurring bill is paid from its account", t.accountBalances()["acc-cash"], -5000);
+t.DB.goals.accounts = t.DB.goals.accounts.slice(0,1); t.DB.goals.defaultAccount = t.DB.goals.accounts[0].id;
+t.openTransfer(); chk("transfer needs 2 accounts (alerts)", lastAlert.includes("second account"), true);
+t.UI.showAccounts=false;
+
+console.log("--- H. every page + sheet renders ---");
+t.setDB({ goals:{monthlyBudgets:{}}, recurring:[{id:"r1",type:"expense",amount:5000,category:"Rent",day:15,lastLoggedMonth:null}], txns:[ tx("income",14124,"Salary","2026-09-05"), tx("expense",13300,"Food","2026-09-20"), tx("income",20000,"Salary","2026-10-07"), tx("transfer",500,"Transfer","2026-10-08",{from:"acc-bank",to:"acc-cash"}) ] });
+for (const tab of ["home","income","expenses","savings","history","goals","about"]) { t.UI.tab=tab; root.innerHTML=""; t.render(); chk("render "+tab, root.innerHTML.length>500, true); }
+t.UI.tab="home"; t.render(); chk("Home shows Accounts card with Transfer + Manage", root.innerHTML.includes("Accounts")&&root.innerHTML.includes("Transfer")&&root.innerHTML.includes("Manage"), true);
+t.UI.tab="goals"; t.render(); chk("Goals shows Categories + Quick add presets", root.innerHTML.includes("Categories")&&root.innerHTML.includes("Quick add presets"), true);
+t.UI.showAccounts=true; t.UI.showTransfer=true; t.UI.showForm=true; t.UI.showWithdraw=true; t.UI.presetFormOpen=true; t.UI.recurringOpen=true; t.UI.recFormType="expense"; t.UI.catTab="income";
+root.innerHTML=""; t.render(); chk("all sheets + forms render together", root.innerHTML.length>3000, true);
+chk("withdraw sheet has account picker", t.viewWithdrawSheet().includes("wAccount"), true);
+chk("transfer row has no edit crash", t.txnRow({id:"x",type:"transfer",amount:5,category:"Transfer",from:"acc-bank",to:"acc-cash",date:"2026-10-08",note:""}, true).includes("openEdit"), true);
+}
+
+{
+console.log("=== Part 3: loans, overdraft guards, screenshot case, About ===");
+const SEPT_OCT = () => [ tx("income",14124,"Salary","2026-09-05"), tx("expense",13300,"Food","2026-09-20"), tx("saving",2000,"Sports fund (Hyrox/IRONMAN)","2026-09-25",{source:"income"}), tx("income",20000,"Salary","2026-10-07") ];
+
+console.log("--- I. screenshot case: Saved this month / withdrawals ---");
+t.setDB({ goals:{}, recurring:[], txns:[ ...SEPT_OCT(), tx("expense",12700,"Food","2026-10-08",{account:"acc-bank"}), tx("withdrawal",1700,"Sports fund (Hyrox/IRONMAN)","2026-10-09",{account:"acc-bank"}) ] });
+let s = t.computeStats();
+chk("left over 7,824 matches cash in hand", [s.leftover, s.cashInHand], [7824, 7824]);
+chk("spent = 12,700 + 1,176 clearance", s.monthExpense, 13876);
+chk("'Saved this month' is no longer negative", s.monthSaving, 0);
+let home = t.viewHome(s);
+chk("withdrawal shown as a note instead", home.includes("withdrawn"), true);
+chk("savings rate never negative", t.safeToSpendCard(s).includes("savings rate 0%") && !t.safeToSpendCard(s).includes("savings rate -"), true);
+
+console.log("--- J. overdraft guards (Cash can't go below zero by accident) ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",20000,"Salary","2026-10-07",{account:"acc-bank"}) ] });
+chk("Cash starts at 0", t.accountBalances()["acc-cash"], 0);
+els.tFrom={value:"acc-cash"}; els.tTo={value:"acc-bank"}; els.tAmount={value:"500"}; els.tDate={value:"2026-10-12"}; els.tNote={value:""}; els.tError={style:{},textContent:""}; t.UI.editingTransferId=null;
+const n0 = t.DB.txns.length;
+t.submitTransfer();
+chk("transfer from an account with 0 is blocked", t.DB.txns.length, n0);
+chk("...with a clear message", els.tError.textContent.includes("no money to move"), true);
+els.tFrom={value:"acc-bank"}; els.tTo={value:"acc-cash"}; els.tAmount={value:"30000"}; els.tError={style:{},textContent:""}; t.submitTransfer();
+chk("transfer bigger than the balance is blocked", [t.DB.txns.length, els.tError.textContent.includes("only has")], [n0, true]);
+els.tAmount={value:"1000"}; els.tError={style:{},textContent:""}; t.submitTransfer();
+chk("a valid transfer still works", t.accountBalances()["acc-cash"], 1000);
+t.UI.showForm=true; t.UI.formType="expense"; t.UI.formSource="income"; t.UI.formAccount="acc-cash"; t.UI.editingId=null;
+els.fAmount={value:"1500"}; els.fCategory={value:"Food"}; els.fDate={value:"2026-10-12"}; els.fNote={value:"x"}; els.fError={style:{},textContent:""};
+const n1 = t.DB.txns.length; CONFIRM = false; t.submitSheet(); CONFIRM = true;
+chk("expense beyond the account balance asks first; 'Cancel' adds nothing", t.DB.txns.length, n1);
+chk("warning text is helpful", t.overdrawMessage("acc-cash", 1500).includes("only has"), true);
+t.UI.showForm=true; t.UI.formAccount="acc-cash"; CONFIRM = true; t.submitSheet();
+chk("'OK' lets you add it anyway", t.DB.txns.length, n1 + 1);
+chk("fine when there is enough money", t.overdrawMessage("acc-bank", 100), "");
+t.setAccountCredit("acc-cash", true);
+chk("credit-card style accounts may go negative without a warning", t.overdrawMessage("acc-cash", 5000), "");
+t.setAccountCredit("acc-cash", false);
+t.render(); t.UI.tab = "home"; t.render();
+chk("Home explains a below-zero account", root.innerHTML.includes("is below zero"), true);
+
+console.log("--- K. loans: interest-free (a friend) ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",20000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+const addLoan = (lender, amount, date, type, rate, acct) => { els.loanLender={value:lender}; els.loanAmount={value:String(amount)}; els.loanDate={value:date}; els.loanType={value:type}; els.loanRate={value:String(rate)}; els.loanAccount={value:acct}; els.loanNote={value:""}; els.loanError={style:{},textContent:""}; t.submitLoan(); return t.DB.goals.loans[0]; };
+let ravi = addLoan("Ravi", 5000, "2026-10-10", "none", 0, "acc-cash");
+s = t.computeStats();
+chk("borrowed money lands in Cash", t.accountBalances()["acc-cash"], 5000);
+chk("cash in hand goes up", s.cashInHand, 25000);
+chk("it is NOT counted as income", s.monthIncome, 20000);
+chk("or as spending", s.monthExpense, 0);
+chk("left over = cash in hand", s.leftover, 25000);
+chk("accounts add up", Object.values(t.accountBalances()).reduce((a,b)=>a+b,0), 25000);
+chk("you owe 5,000", t.loanStats(ravi).outstanding, 5000);
+chk("no interest accrues", t.loanStats(ravi).interestDue, 0);
+chk("Home shows 'Money you owe'", t.viewHome(s).includes("Money you owe"), true);
+chk("line-by-line shows the borrowed money", t.reconcileCard(s).includes("Borrowed"), true);
+t.UI.loanPay = { id: ravi.id, mode: "principal" }; els.lpAmount={value:"2000"}; els.lpAccount={value:"acc-cash"}; els.lpDate={value:"2026-10-11"}; els.lpError={style:{},textContent:""}; t.submitLoanPay();
+s = t.computeStats();
+chk("partial repay: owe 3,000", t.loanStats(ravi).outstanding, 3000);
+chk("cash drops by 2,000", s.cashInHand, 23000);
+chk("repaying principal is not an expense", s.monthExpense, 0);
+chk("left over still = cash", s.leftover, 23000);
+chk("loan still open", ravi.status, "open");
+t.UI.loanPay = { id: ravi.id, mode: "principal" }; els.lpAmount={value:"9999"}; t.submitLoanPay();
+chk("can't repay more than you owe", els.lpError.textContent.includes("only owe"), true);
+t.UI.loanPay = { id: ravi.id, mode: "close" }; els.lpInterest = undefined; t.submitLoanPay();
+s = t.computeStats();
+chk("close: nothing owed", t.loanStats(ravi).totalOwed, 0);
+chk("close: status closed", ravi.status, "closed");
+chk("close: cash back to 20,000", s.cashInHand, 20000);
+chk("closed loan listed on Loans tab", t.viewLoans(s).includes("Closed loans"), true);
+chk("home card disappears when nothing is owed", t.homeLoansCard(s), "");
+
+console.log("--- L. loans: monthly interest ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",30000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+let muthu = addLoan("Muthu", 10000, "2026-08-12", "monthly", 2, "acc-bank");
+let ls = t.loanStats(muthu);
+chk("2 full months at 2% -> 400 interest due", ls.interestDue, 400);
+chk("monthly cost 200", ls.monthly, 200);
+chk("next interest date", ls.nextDate, "2026-11-12");
+t.UI.loanPay = { id: muthu.id, mode: "interest" }; els.lpAmount={value:"400"}; els.lpAccount={value:"acc-bank"}; els.lpDate={value:"2026-10-12"}; t.submitLoanPay();
+ls = t.loanStats(muthu); s = t.computeStats();
+chk("interest-only payment: principal untouched", ls.outstanding, 10000);
+chk("interest due cleared", ls.interestDue, 0);
+chk("interest IS a real expense this month", s.monthExpense, 400);
+chk("...under 'Loan interest'", s.byCat["Loan interest"], 400);
+chk("loan still open", muthu.status, "open");
+chk("cash: +10,000 borrowed -400 interest", s.cashInHand, 30000 + 10000 - 400);
+chk("left over = cash", s.leftover, s.cashInHand);
+t.UI.loanPay = { id: muthu.id, mode: "close" }; els.lpInterest={value:"0"}; t.submitLoanPay();
+chk("close with interest already paid", [muthu.status, t.loanStats(muthu).totalOwed], ["closed", 0]);
+chk("cash after closing = 30000 - 400", t.computeStats().cashInHand, 29600);
+
+console.log("--- M. loans: partial repayment lowers interest; edge cases ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",30000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+let loanB = addLoan("Karthik", 10000, "2026-08-12", "monthly", 2, "acc-bank");
+t.DB.txns.unshift({ id:"r-early", type:"repay", amount:5000, category:"Loan repayment", date:"2026-09-10", loanId: loanB.id, account:"acc-bank", note:"" });
+chk("repaying before a month starts lowers that month's interest (200 + 100)", t.loanStats(loanB).accrued, 300);
+chk("addMonthsIso clamps month ends", [t.addMonthsIso("2026-01-31",1), t.addMonthsIso("2026-12-15",2), t.addMonthsIso("2026-10-12",0)], ["2026-02-28","2027-02-15","2026-10-12"]);
+chk("loan entries are not editable from lists", t.txnRow({id:"x",type:"expense",amount:5,category:"Loan interest",date:"2026-10-01",note:"",loanId:"l1",account:"acc-bank"}, true).includes("openEdit"), false);
+chk("borrow rows read well", t.txnRow(t.DB.txns[t.DB.txns.length-1].type==="income" ? t.DB.txns.find(x=>x.type==="borrow") : t.DB.txns[0], true).includes("Borrowed from Karthik"), true);
+els.loanLender={value:""}; els.loanError={style:{},textContent:""}; const nl = t.DB.goals.loans.length; t.submitLoan();
+chk("loan needs a lender", [t.DB.goals.loans.length, els.loanError.textContent.length>0], [nl, true]);
+els.loanLender={value:"Z"}; els.loanAmount={value:"1000"}; els.loanType={value:"monthly"}; els.loanRate={value:"0"}; els.loanError={style:{},textContent:""}; t.submitLoan();
+chk("monthly interest needs a rate", [t.DB.goals.loans.length, els.loanError.textContent.includes("rate")], [nl, true]);
+els.loanType={value:"none"}; els.loanAccount={value:""}; els.loanDate={value:"2026-10-01"}; els.loanError={style:{},textContent:""};
+const cashBefore = t.computeStats().cashInHand; t.submitLoan();
+chk("'already had this money' adds the loan without touching balances", [t.DB.goals.loans.length, t.computeStats().cashInHand], [nl + 1, cashBefore]);
+// undo a payment reopens a closed loan; deleting a loan removes its entries
+let loanC = t.DB.goals.loans[0];
+t.UI.loanPay = { id: loanC.id, mode: "close" }; els.lpAccount={value:"acc-bank"}; els.lpDate={value:"2026-10-12"}; t.submitLoanPay();
+chk("closed", loanC.status, "closed");
+const repayTxn = t.DB.txns.find(x => x.loanId === loanC.id && x.type === "repay");
+t.undoLoanTxn(repayTxn.id);
+chk("undoing the repayment reopens the loan", loanC.status, "open");
+const cashA = t.computeStats().cashInHand;
+t.deleteLoan(loanB.id);
+chk("deleting a loan removes its entries", t.DB.txns.some(x => x.loanId === loanB.id), false);
+chk("...and the loan", !!t.loanById(loanB.id), false);
+chk("accounts still add up", Object.values(t.accountBalances()).reduce((a,b)=>a+b,0), t.computeStats().cashInHand);
+
+console.log("--- N. close suggestions (highest interest first) ---");
+t.setDB({ goals:{}, recurring:[], txns:[] });
+const mkLoan = (lender, principal, rate) => { const l = { id:"L-"+lender, lender, principal, date:"2026-08-12", rate, note:"", status:"open", closedDate:null }; t.DB.goals.loans.push(l); return l; };
+mkLoan("Muthu", 10000, 2); mkLoan("Friend", 5000, 0);
+let sg = t.loanSuggestions(18000);
+chk("enough for both: costly loan first", sg.canClose.map(c => c.l.lender), ["Muthu", "Friend"]);
+chk("cash left after both", sg.canClose[1].cashAfter, 18000 - 10400 - 5000);
+sg = t.loanSuggestions(12000);
+chk("enough for the costly one only", sg.canClose.map(c => c.l.lender), ["Muthu"]);
+sg = t.loanSuggestions(6000);
+chk("not enough: don't burn cash on the interest-free loan", sg.canClose.length, 0);
+chk("...tell you how short you are for the costly one", [sg.short && sg.short.l.lender, sg.shortBy], ["Muthu", 4400]);
+sg = t.loanSuggestions(0);
+chk("no cash, no suggestion", [sg.canClose.length, sg.short], [0, null]);
+t.DB.goals.loans[0].status = "closed"; t.DB.goals.loans[0].closedDate = "2026-10-01";
+sg = t.loanSuggestions(5000);
+chk("interest-free loan alone: suggest closing it", sg.canClose.map(c => c.l.lender), ["Friend"]);
+chk("suggestion text names the lender", t.viewLoans({cashInHand:5000, thisMonth:"2026-10"}).includes("You can close Friend now"), true);
+t.DB.goals.loans = []; mkLoan("Muthu", 10000, 2);
+chk("safe-to-spend subtracts loan interest already due", t.safeToSpendCard({ leftover: 5000, thisMonth:"2026-10", monthIncome:0, monthSaving:0 }).includes("loan interest still due"), true);
+
+console.log("--- O. About page, categories, pages ---");
+const about = t.viewAbout();
+chk("About: correct repo link", about.includes("github.com/naveen-yonko/Pennylogv2.1/issues/new"), true);
+chk("About: real contact email, no placeholder", about.includes("mailto:naveen2992005@gmail.com") && !about.includes("example.com"), true);
+chk("About: current version", about.includes("Version 2.6"), true);
+t.setDB({ goals:{expenseCats:["Food","Other"]}, recurring:[], txns:[] });
+chk("existing users get the built-in 'Loan interest' category", t.DB.goals.expenseCats.includes("Loan interest"), true);
+t.deleteCategory("expense", t.DB.goals.expenseCats.indexOf("Loan interest"));
+chk("...and it can't be deleted", t.DB.goals.expenseCats.includes("Loan interest"), true);
+t.setDB({ goals:{monthlyBudgets:{}}, recurring:[], txns:[ ...SEPT_OCT(), tx("transfer",500,"Transfer","2026-10-08",{from:"acc-bank",to:"acc-cash"}) ] });
+addLoan("Ravi", 2000, "2026-10-05", "monthly", 3, "acc-bank");
+for (const tab of ["home","income","expenses","savings","loans","history","goals","about"]) { t.UI.tab=tab; root.innerHTML=""; t.render(); chk("render "+tab, root.innerHTML.length>500, true); }
+t.UI.tab="home"; t.render();
+chk("nav has a Loans tab", root.innerHTML.includes("setTab('loans')"), true);
+t.UI.histFilter = "loan"; chk("History 'Loans' filter shows loan entries", t.viewHistory().includes("Borrowed from Ravi"), true); t.UI.histFilter = "all";
+t.UI.showLoanForm = true; t.UI.loanPay = { id: t.DB.goals.loans[0].id, mode: "interest" }; t.UI.showAccounts = true;
+root.innerHTML=""; t.render(); chk("loan form + pay sheet + accounts sheet render together", root.innerHTML.length > 3000, true);
+for (const mode of ["interest","principal","close"]) { t.UI.loanPay = { id: t.DB.goals.loans[0].id, mode }; chk("pay sheet ("+mode+") renders", t.viewLoanPaySheet().length > 300, true); }
+chk("accounts sheet has the credit-card toggle", t.viewAccountsSheet().includes("Can go below zero"), true);
+chk("CSV export doesn't crash", (() => { global.Blob = class {}; global.URL = { createObjectURL: () => "", revokeObjectURL() {} }; global.document.createElement = () => ({ click() {} }); global.document.body = { appendChild() {}, removeChild() {} }; try { t.exportCsv(); return true; } catch (e) { return e.message; } })(), true);
+}
+
+{
+console.log("=== Part 4: sync safety, backup / reset, rounding, wording ===");
+let cloud = null, unsubs = 0, snapCb = null, signedOut = 0;
+window.__fb = { auth: {}, dbFs: {}, doc: (d, c, u) => ({ c, u }), setDoc: (ref, val) => { cloud = val; return Promise.resolve(); }, onSnapshot: (ref, cb) => { snapCb = cb; return () => { unsubs++; }; }, signOut: () => { signedOut++; } };
+
+console.log("--- P. cloud sync can't break on empty fields ---");
+t.setDB({ goals:{}, recurring:[{id:"r1",type:"expense",amount:100,category:"Rent",day:1,lastLoggedMonth:null}], txns:[ tx("income",1000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+t.AUTH.user = { uid:"u1", email:"a@b.c" };
+t.logRecurring("r1","2026-10");
+chk("an older recurring bill (no account saved) logs fine", t.DB.txns[0].category, "Rent");
+chk("data sent to the cloud has no 'undefined'", JSON.stringify(cloud).includes("undefined"), false);
+chk("...the empty field is simply left out", Object.prototype.hasOwnProperty.call(cloud.txns[0], "account"), false);
+
+console.log("--- Q. one device, two accounts ---");
+store["pennylog-owner"] = "u0";
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",999,"Salary","2026-10-01") ] });
+const unsubBefore = unsubs;
+window.onAuthChange({ uid:"u1", email:"new@b.c" });
+chk("the previous person's data is NOT copied into a new account", t.DB.txns.length, 0);
+snapCb({ exists: () => false });
+chk("a brand-new account is saved clean", cloud.txns.length, 0);
+chk("device now belongs to the new account", store["pennylog-owner"], "u1");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",500,"Salary","2026-10-01") ] });
+window.onAuthChange({ uid:"u1", email:"new@b.c" });
+snapCb({ exists: () => false });
+chk("the same person signing in again keeps their data", t.DB.txns.length, 1);
+chk("the previous sync listener is closed on every sign-in (no duplicates)", unsubs - unsubBefore, 1);
+snapCb({ exists: () => true, metadata: { hasPendingWrites: true }, data: () => ({ txns: [], goals: {}, recurring: [] }) });
+chk("our own save echoing back is ignored", t.DB.txns.length, 1);
+snapCb({ exists: () => true, data: () => ({ txns:[ tx("expense",50,"Food","2026-10-02") ], goals:{}, recurring:[] }) });
+chk("changes from another device replace local data", [t.DB.txns.length, t.DB.txns[0].category], [1, "Food"]);
+
+console.log("--- R. sign out leaves nothing behind ---");
+t.AUTH.syncState = "synced"; store["pennylog-db-v1"] = "something";
+t.doSignOut();
+chk("data wiped from memory", t.DB.txns.length, 0);
+chk("data wiped from the device", [store["pennylog-db-v1"], store["pennylog-owner"]], [undefined, undefined]);
+chk("signed out of Firebase", signedOut, 1);
+t.AUTH.syncState = "error"; t.setDB({ goals:{}, recurring:[], txns:[ tx("income",5,"Salary","2026-10-01") ] });
+CONFIRM = false; t.doSignOut(); CONFIRM = true;
+chk("unsynced changes: asks first, and Cancel keeps you signed in", [signedOut, t.DB.txns.length], [1, 1]);
+
+console.log("--- S. clear all data ---");
+const loaded = () => { t.setDB({ goals:{ custom:[{id:"g1",name:"Laptop",target:5000,date:""}] }, recurring:[{id:"r1",type:"expense",amount:1,category:"Rent",day:1,lastLoggedMonth:null}], txns:[ tx("income",5000,"Salary","2026-10-01",{account:"acc-bank"}), tx("expense",100,"Food","2026-10-02",{account:"acc-bank"}) ] }); t.DB.goals.loans.push({id:"L1",lender:"Ravi",principal:100,date:"2026-10-01",rate:0,status:"open",closedDate:null}); t.DB.goals.accounts.push({id:"x1",name:"Wallet",opening:50}); t.DB.goals.expenseCats.push("Gym"); };
+loaded(); PROMPT = "nope"; t.clearAllData();
+chk("wrong confirmation word: nothing deleted", t.DB.txns.length, 2);
+PROMPT = "DELETE"; CONFIRM = false; t.clearAllData(); CONFIRM = true;
+chk("Cancel on the first warning: nothing deleted", t.DB.txns.length, 2);
+t.clearAllData();
+chk("entries cleared", t.DB.txns.length, 0);
+chk("loans, recurring, goals cleared", [t.DB.goals.loans.length, t.DB.recurring.length, t.DB.goals.custom.length], [0, 0, 0]);
+chk("accounts and categories back to the defaults", [t.DB.goals.accounts.map(a => a.name), t.DB.goals.expenseCats.includes("Gym")], [["Cash","Bank / UPI"], false]);
+chk("cash in hand is zero", t.computeStats().cashInHand, 0);
+chk("the empty state was sent to the cloud", cloud.txns.length, 0);
+t.render(); chk("app renders after a reset", root.innerHTML.length > 500, true);
+chk("Goals page shows the Backup & reset card", (t.UI.tab = "goals", t.render(), root.innerHTML.includes("Clear all data") && root.innerHTML.includes("Download backup")), true);
+
+console.log("--- T. backup & restore ---");
+loaded();
+const backup = t.buildBackup();
+chk("backup is valid JSON with the app name", JSON.parse(backup).app, "PennyLog");
+chk("backup contains no 'undefined'", backup.includes("undefined"), false);
+t.setDB({ goals:{}, recurring:[], txns:[] });
+let r = t.restoreFromText(backup);
+chk("restore succeeds", [r.ok, r.count], [true, 2]);
+chk("entries, loans, goals, accounts all come back", [t.DB.txns.length, t.DB.goals.loans.length, t.DB.goals.custom.length, t.DB.goals.accounts.some(a => a.name === "Wallet")], [2, 1, 1, true]);
+chk("cash in hand matches the original", t.computeStats().cashInHand, 5000 - 100 + 50);
+const keep = t.DB.txns.length;
+r = t.restoreFromText("not json"); chk("garbage file is rejected", [r.ok, t.DB.txns.length], [false, keep]);
+r = t.restoreFromText(JSON.stringify({ data: { txns: [ { id:"a", type:"hack", amount:1, date:"2026-10-01" } ], goals:{} } })); chk("a damaged entry rejects the whole file", [r.ok, t.DB.txns.length], [false, keep]);
+r = t.restoreFromText(JSON.stringify({ hello: 1 })); chk("wrong kind of JSON is rejected", r.ok, false);
+r = t.restoreFromText(JSON.stringify({ txns: [], goals: {} })); chk("a bare {txns, goals} file also works", r.ok, true);
+
+console.log("--- U. rounding and wording ---");
+chk("no '-₹0' from floating-point dust", [t.fmtINR(-0.3), t.fmtINR(0.4), t.fmtINR(-1176), t.fmtINR(1234567)], ["₹0", "₹0", "\u2212₹1,176", "₹12,34,567"]);
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",0.1,"Salary","2026-10-01"), tx("income",0.2,"Salary","2026-10-02") ] });
+chk("0.1 + 0.2 is exactly 0.3 in cash in hand", t.computeStats().cashInHand, 0.3);
+const fy = t.fyRange(new Date(2026, 9, 12));
+chk("financial year boundaries (Apr 1 – Mar 31) are exact", [t.inRange("2026-04-01", fy), t.inRange("2026-03-31", fy), t.inRange("2027-03-31", fy), t.inRange("2027-04-01", fy)], [true, false, true, false]);
+t.setDB({ goals:{}, recurring:[{id:"r9",type:"expense",amount:5000,category:"Rent",day:15,lastLoggedMonth:null}], txns:[] });
+const base = { thisMonth:"2026-10", monthIncome:1000, monthSaving:500, monthSavingFromCash:100 };
+chk("safe-to-spend: below zero says so", t.safeToSpendCard({ ...base, leftover:-300 }).includes("below zero"), true);
+chk("safe-to-spend: money left but bills bigger says 'short'", (h => h.includes("short") && h.includes("bills still due"))(t.safeToSpendCard({ ...base, leftover:100 })), true);
+chk("savings rate counts only what you saved out of income (100/1000)", t.safeToSpendCard({ ...base, leftover:100 }).includes("savings rate 10%"), true);
+}
+
+{
+console.log("=== Part 5: lending (money owed to you), About account card ===");
+const sumAcc = () => Object.values(t.accountBalances()).reduce((a, b) => a + b, 0);
+const lendLoan = (who, amount, date, type, rate, acct) => { t.UI.loanFormDir = "lend"; els.loanLender={value:who}; els.loanAmount={value:String(amount)}; els.loanDate={value:date}; els.loanType={value:type}; els.loanRate={value:String(rate)}; els.loanAccount={value:acct}; els.loanNote={value:""}; els.loanError={style:{},textContent:""}; t.submitLoan(); t.UI.loanFormDir = "borrow"; return t.DB.goals.loans[0]; };
+const payLoan = (loan, mode, amount, date, acct, interest) => { t.UI.loanPay = { id: loan.id, mode }; els.lpAmount={value:String(amount)}; els.lpAccount={value:acct||"acc-bank"}; els.lpDate={value:date||"2026-10-12"}; els.lpError={style:{},textContent:""}; els.lpInterest = interest === undefined ? undefined : {value:String(interest)}; t.submitLoanPay(); };
+
+console.log("--- V. lend money, interest-free ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",20000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+let arun = lendLoan("Arun", 3000, "2026-10-10", "none", 0, "acc-bank");
+let s = t.computeStats();
+chk("the loan is marked as lent", [arun.dir, arun.status], ["lend", "open"]);
+chk("lending takes the money out of the account", t.accountBalances()["acc-bank"], 17000);
+chk("cash in hand drops by 3,000", s.cashInHand, 17000);
+chk("lending is NOT spending", s.monthExpense, 0);
+chk("left over = cash in hand", s.leftover, 17000);
+chk("accounts add up", sumAcc(), 17000);
+chk("they owe you 3,000", t.loanStats(arun).outstanding, 3000);
+chk("not on the 'I owe' list", t.openLoans().length, 0);
+chk("on the 'owed to me' list", t.openLends().length, 1);
+chk("line-by-line shows 'Lent out'", t.reconcileCard(s).includes("Lent out"), true);
+chk("Home shows an 'Owed to you' card, not 'Money you owe'", [t.homeLoansCard(s).includes("Owed to you"), t.homeLoansCard(s).includes("Money you owe")], [true, false]);
+chk("the row reads 'Lent to Arun'", t.txnRow(t.DB.txns[0], true).includes("Lent to Arun"), true);
+chk("History month totals count it as money out", t.buildLedger()[0].lent, 3000);
+payLoan(arun, "principal", 1000, "2026-10-11");
+s = t.computeStats();
+chk("collect 1,000: they owe 2,000", t.loanStats(arun).outstanding, 2000);
+chk("cash +1,000", s.cashInHand, 18000);
+chk("money coming back is NOT income", s.monthIncome, 20000);
+chk("left over = cash", s.leftover, 18000);
+chk("the row reads 'Collected from Arun'", t.txnRow(t.DB.txns[0], true).includes("Collected from Arun"), true);
+payLoan(arun, "principal", 9999, "2026-10-11");
+chk("can't collect more than they owe", els.lpError.textContent.includes("owe you"), true);
+payLoan(arun, "close", 0, "2026-10-12");
+s = t.computeStats();
+chk("mark as paid: closed and nothing owed", [arun.status, t.loanStats(arun).totalOwed], ["closed", 0]);
+chk("all the money is back", s.cashInHand, 20000);
+chk("accounts add up", sumAcc(), 20000);
+chk("History 'Loans' filter shows lent entries", (t.UI.histFilter = "loan", t.viewHistory().includes("Lent to Arun")), true); t.UI.histFilter = "all";
+
+console.log("--- W. lend with monthly interest ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",30000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+let kiran = lendLoan("Kiran", 10000, "2026-08-12", "monthly", 2, "acc-bank");
+let ks = t.loanStats(kiran);
+chk("2 full months at 2% -> 400 interest due to you", [ks.interestDue, ks.monthly], [400, 200]);
+chk("interest owed TO you doesn't reduce safe-to-spend", t.safeToSpendCard({ leftover:5000, thisMonth:"2026-10", monthIncome:0, monthSavingFromCash:0 }).includes("still due"), false);
+payLoan(kiran, "interest", 400, "2026-10-12");
+s = t.computeStats();
+chk("interest you receive IS income", s.monthIncome, 30400);
+chk("...under 'Interest'", t.DB.txns[0].type === "income" && t.DB.txns[0].category === "Interest", true);
+chk("principal still owed, interest cleared", [t.loanStats(kiran).outstanding, t.loanStats(kiran).interestDue], [10000, 0]);
+chk("cash: -10,000 lent +400 interest", s.cashInHand, 30000 - 10000 + 400);
+chk("left over = cash", s.leftover, s.cashInHand);
+chk("interest-income row can't be edited from lists", t.txnRow(t.DB.txns[0], true).includes("openEdit"), false);
+payLoan(kiran, "close", 0, "2026-10-12", "acc-bank", 0);
+chk("closing after interest was received", [kiran.status, t.computeStats().cashInHand], ["closed", 30400]);
+t.undoLoanTxn(t.DB.txns.find(x => x.type === "collect").id);
+chk("undoing the collection reopens it", kiran.status, "open");
+
+console.log("--- X. both directions together ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",20000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+t.DB.goals.loans.push({ id:"b1", lender:"Ravi", principal:5000, date:"2026-10-01", rate:0, note:"", status:"open", closedDate:null });
+t.DB.goals.loans.push({ id:"l1", dir:"lend", lender:"Arun", principal:3000, date:"2026-10-01", rate:0, note:"", status:"open", closedDate:null });
+s = t.computeStats(); t.UI.loanView = "owe";
+chk("'I owe' view lists only what you owe", [t.viewLoans(s).includes("Ravi"), t.viewLoans(s).includes("Arun")], [true, false]);
+chk("net position says you owe 2,000 more", t.viewLoans(s).includes("You owe <strong>\u20B92,000</strong> more"), true);
+chk("add button matches the view", t.viewLoans(s).includes("openLoanForm('borrow')"), true);
+t.setLoanView("owed");
+chk("'Owed to me' view lists only what's owed to you", [t.viewLoans(s).includes("Ravi"), t.viewLoans(s).includes("Arun")], [false, true]);
+chk("...with a Lend money button", t.viewLoans(s).includes("openLoanForm('lend')") && t.viewLoans(s).includes("Lend money"), true);
+chk("borrow suggestions ignore money lent out", t.loanSuggestions(10000).canClose.map(c => c.l.lender), ["Ravi"]);
+t.UI.loanFormDir = "lend"; chk("lend form uses lend wording", t.viewLoanSheet().includes("Who did you lend to?"), true);
+t.UI.loanFormDir = "borrow"; chk("borrow form keeps its wording", t.viewLoanSheet().includes("Who did you borrow from?"), true);
+t.UI.loanPay = { id:"l1", mode:"close" }; chk("collect sheet wording", t.viewLoanPaySheet().includes("Mark as fully paid back"), true);
+t.UI.loanPay = { id:"b1", mode:"close" }; chk("repay sheet wording is unchanged", t.viewLoanPaySheet().includes("Close this loan"), true);
+t.UI.loanPay = null; t.setLoanView("owe");
+
+console.log("--- Y. overdraft on lending, backup of lent entries ---");
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",1000,"Salary","2026-10-01",{account:"acc-bank"}) ] });
+const count0 = t.DB.goals.loans.length;
+CONFIRM = false; lendLoan("Z", 5000, "2026-10-12", "none", 0, "acc-bank"); CONFIRM = true;
+chk("lending more than the account holds asks first; Cancel adds nothing", [t.DB.goals.loans.length, t.DB.txns.length], [count0, 1]);
+lendLoan("Z", 500, "2026-10-12", "none", 0, "acc-bank");
+chk("lending within the balance is fine", t.DB.goals.loans.length, count0 + 1);
+const bk = t.buildBackup(); t.setDB({ goals:{}, recurring:[], txns:[] });
+chk("a backup with lent entries restores", [t.restoreFromText(bk).ok, t.DB.txns.some(x => x.type === "lend"), t.computeStats().cashInHand], [true, true, 500]);
+lendLoan("Old", 800, "2026-09-01", "none", 0, "");
+chk("'lent before tracking' leaves balances alone", [t.computeStats().cashInHand, t.DB.goals.loans[0].dir], [500, "lend"]);
+
+console.log("--- Z. About page account card, login screen ---");
+t.AUTH.user = { uid:"u1", email:"me@example.org" };
+const ab = t.viewAbout();
+chk("About has Sign out, Reset this device and Erase all my data", ["Sign out", "Reset this device", "Erase all my data"].every(x => ab.includes(x)), true);
+chk("...and shows who is signed in", ab.includes("me@example.org"), true);
+t.AUTH.user = null; chk("signed-out About page has no account card", t.viewAbout().includes("Reset this device"), false);
+chk("login screen offers Continue with Google", t.viewAuth().includes("Continue with Google"), true);
+chk("...above the email form", t.viewAuth().indexOf("Continue with Google") < t.viewAuth().indexOf('id="authEmail"'), true);
+chk("friendly messages for Google errors", [t.friendlyAuthError("auth/popup-closed-by-user"), t.friendlyAuthError("auth/popup-blocked").includes("pop-ups"), t.friendlyAuthError("auth/unauthorized-domain").includes("Authorized domains")], ["Google sign-in was cancelled.", true, true]);
+t.AUTH.user = { uid:"u1", email:"a@b.c" };
+}
+
+(async () => {
+console.log("=== Part 6: Google sign-in and reset this device (async) ===");
+const tick = () => new Promise(r => setTimeout(r, 0));
+let googleCalls = 0, googleFail = null;
+window.__fb.signInWithGoogle = () => { googleCalls++; return googleFail ? Promise.reject({ code: googleFail }) : Promise.resolve({}); };
+t.AUTH.user = null; t.AUTH.error = "";
+t.doGoogleSignIn(); await tick();
+chk("the Google button calls Firebase", googleCalls, 1);
+googleFail = "auth/popup-closed-by-user"; t.doGoogleSignIn(); await tick();
+chk("cancelling shows a friendly message", t.AUTH.error, "Google sign-in was cancelled.");
+googleFail = "auth/unauthorized-domain"; t.doGoogleSignIn(); await tick();
+chk("an unlisted domain explains how to fix it", t.AUTH.error.includes("Authorized domains"), true);
+delete window.__fb.signInWithGoogle; t.doGoogleSignIn(); await tick();
+chk("if Firebase isn't ready it says so", t.AUTH.error.includes("isn't ready"), true);
+
+t.AUTH.user = { uid:"u1", email:"a@b.c" }; t.AUTH.syncState = "synced";
+let cacheDel = [], unreg = 0, idbDel = [], reloaded = 0, wiped = 0;
+global.caches = { keys: async () => ["c1", "c2"], delete: async (k) => { cacheDel.push(k); return true; } };
+Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { getRegistrations: async () => [{ unregister: async () => { unreg++; } }] } });
+global.indexedDB = { databases: async () => [{ name: "firebaseLocalStorageDb" }, { name: "firestore/x" }], deleteDatabase: (n) => { idbDel.push(n); const rq = {}; setTimeout(() => rq.onsuccess && rq.onsuccess(), 0); return rq; } };
+global.location = { reload: () => { reloaded++; } };
+window.__fb.wipeFirestoreCache = async () => { wiped++; };
+let soCount = 0; window.__fb.signOut = () => { soCount++; };
+store["pennylog-db-v1"] = "x"; store["pennylog-owner"] = "u1"; store["other"] = "y";
+t.setDB({ goals:{}, recurring:[], txns:[ tx("income",5,"Salary","2026-10-01") ] });
+CONFIRM = false; await t.resetThisDevice(); CONFIRM = true;
+chk("Cancel: nothing is touched", [reloaded, cacheDel.length, Object.keys(store).length > 0, t.DB.txns.length], [0, 0, true, 1]);
+await t.resetThisDevice();
+chk("signs out of Firebase", soCount, 1);
+chk("deletes Firestore's offline copy", wiped, 1);
+chk("clears everything saved on the device", [Object.keys(store).length, sessionCleared > 0], [0, true]);
+chk("deletes the app's cached files", cacheDel, ["c1", "c2"]);
+chk("removes the service worker", unreg, 1);
+chk("deletes the browser databases", idbDel, ["firebaseLocalStorageDb", "firestore/x"]);
+chk("the in-memory data is emptied too", t.DB.txns.length, 0);
+chk("reloads the app so it starts fresh", reloaded, 1);
+window.__fb.wipeFirestoreCache = async () => { throw new Error("boom"); };
+global.caches = { keys: async () => { throw new Error("no"); } };
+await t.resetThisDevice();
+chk("one failing step never stops the reset", reloaded, 2);
+
+console.log("\n" + passes + " passed, " + fails + " failed");
+process.exit(fails ? 1 : 0);
+})();

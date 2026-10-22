@@ -15,7 +15,7 @@ const LOCKED_CATS = { expense: ["Other", LOAN_INTEREST_CATEGORY], income: ["Sala
 const CATS_INCOME = ["Salary","Freelance","Bonus","Interest","Gift","Other"];
 const TAX_80C_LIMIT = 150000;
 const GITHUB_REPO = "https://github.com/naveen-yonko/Pennylogv2.1";
-const APP_VERSION = "2.5";
+const APP_VERSION = "2.6";
 const CONTACT_EMAIL = "naveen2992005@gmail.com"; // shown on the About page
 
 const TYPE_META = {
@@ -25,6 +25,8 @@ const TYPE_META = {
   transfer:   { label: "Transfer", color: "var(--ink-soft)", tint: "rgba(28,27,25,0.07)", sign: "" },
   borrow:     { label: "Borrowed", color: "var(--loan)", tint: "var(--loan-tint)", sign: "+" },
   repay:      { label: "Loan repaid", color: "var(--loan)", tint: "var(--loan-tint)", sign: "\u2212" },
+  lend:       { label: "Lent", color: "var(--loan)", tint: "var(--loan-tint)", sign: "\u2212" },
+  collect:    { label: "Collected", color: "var(--loan)", tint: "var(--loan-tint)", sign: "+" },
   withdrawal: { label: "Withdrawal", color: "var(--withdraw)", tint: "var(--withdraw-tint)", sign: "+" },
 };
 
@@ -60,7 +62,7 @@ function icon(name, size) {
   size = size || 18;
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
 }
-function catIcon(type) { return (type === "borrow" || type === "repay") ? "rupee" : type === "transfer" ? "transfer" : (type === "income" || type === "withdrawal") ? "income" : type === "saving" ? "sprout" : "expense"; }
+function catIcon(type) { return (type === "borrow" || type === "repay" || type === "lend" || type === "collect") ? "rupee" : type === "transfer" ? "transfer" : (type === "income" || type === "withdrawal") ? "income" : type === "saving" ? "sprout" : "expense"; }
 // Savings categories = built-ins + your own goals + any older category still used by past entries
 function savingCategories() {
   const names = [...CATS_SAVING_BASE];
@@ -90,8 +92,8 @@ function monthKeyOffset(offset) { const n = new Date(); return localIso(new Date
 function monthLong(key) { const [y,m] = key.split("-"); return new Date(Number(y), Number(m)-1, 1).toLocaleDateString("en-GB", { month: "long", year: "numeric" }); }
 // How a transaction moves your cash in hand
 function cashEffect(t) {
-  if (t.type === "income" || t.type === "withdrawal" || t.type === "borrow") return t.amount;
-  if (t.type === "expense" || t.type === "repay") return -t.amount;
+  if (t.type === "income" || t.type === "withdrawal" || t.type === "borrow" || t.type === "collect") return t.amount;
+  if (t.type === "expense" || t.type === "repay" || t.type === "lend") return -t.amount;
   if (t.type === "saving") return t.source === "external" ? 0 : -t.amount;
   return 0;
 }
@@ -102,8 +104,8 @@ function acctName(id) { const a = acctById(resolveAcct(id)); return a ? a.name :
 // How one transaction moves each account's balance (entries without an account use the default account)
 function accountEffects(t) {
   const a = t.amount;
-  if (t.type === "income" || t.type === "withdrawal" || t.type === "borrow") return [[resolveAcct(t.account), a]];
-  if (t.type === "expense" || t.type === "repay") return [[resolveAcct(t.account), -a]];
+  if (t.type === "income" || t.type === "withdrawal" || t.type === "borrow" || t.type === "collect") return [[resolveAcct(t.account), a]];
+  if (t.type === "expense" || t.type === "repay" || t.type === "lend") return [[resolveAcct(t.account), -a]];
   if (t.type === "saving") return t.source === "external" ? [] : [[resolveAcct(t.account), -a]];
   if (t.type === "transfer") return [[resolveAcct(t.from), -a], [resolveAcct(t.to), a]];
   return [];
@@ -127,7 +129,11 @@ function overdrawMessage(accId, outflow, excludeId) {
 }
 function openingTotal() { return DB.goals.accounts.reduce((s, a) => s + (a.opening || 0), 0); }
 function titleOf(t) {
-  if (t.type === "borrow" || t.type === "repay") { const l = loanById(t.loanId); return (t.type === "borrow" ? "Borrowed from " : "Loan repaid to ") + (l ? l.lender : "lender"); }
+  if (t.type === "borrow" || t.type === "repay" || t.type === "lend" || t.type === "collect") {
+    const l = loanById(t.loanId);
+    const who = l ? l.lender : (t.type === "lend" || t.type === "collect" ? "borrower" : "lender");
+    return { borrow: "Borrowed from ", repay: "Loan repaid to ", lend: "Lent to ", collect: "Collected from " }[t.type] + who;
+  }
   return t.type === "transfer" ? acctName(t.from) + " \u2192 " + acctName(t.to) : t.category;
 }
 function acctPart(t) {
@@ -179,7 +185,7 @@ function loadLocalDB() {
 function saveLocalDB() { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 
 let DB = normalizeDB(loadLocalDB());
-let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
+let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, loanFormDir: "borrow", loanView: "owe", catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
 let AUTH = { user: null, ready: false, mode: "login", error: "", syncState: "offline" };
 
 const OWNER_KEY = "pennylog-owner";
@@ -253,9 +259,11 @@ function computeStats() {
   const monthSaving = monthSavingRaw; // saved this month; withdrawals are shown separately
   const monthBorrowed = monthTxns.filter(t=>t.type==="borrow").reduce((s,t)=>s+t.amount,0);
   const monthRepaid = monthTxns.filter(t=>t.type==="repay").reduce((s,t)=>s+t.amount,0);
+  const monthLent = monthTxns.filter(t=>t.type==="lend").reduce((s,t)=>s+t.amount,0);
+  const monthCollected = monthTxns.filter(t=>t.type==="collect").reduce((s,t)=>s+t.amount,0);
   // Left over = carried-forward surplus + income - spent (incl. shortfall cleared) - saved + withdrawn
   const openingBalance = curM.opening;
-  const monthLeftover = round2(monthIncome - monthExpense - monthSavingFromCash + monthWithdrawn + monthBorrowed - monthRepaid);
+  const monthLeftover = round2(monthIncome - monthExpense - monthSavingFromCash + monthWithdrawn + monthBorrowed - monthRepaid - monthLent + monthCollected);
   const leftover = round2(curM.carry + monthLeftover);
 
   const byCat = {};
@@ -295,7 +303,7 @@ function computeStats() {
   const expenseDelta = lastMonthExpense>0 ? Math.round(((monthExpense-lastMonthExpense)/lastMonthExpense)*100) : null;
   const savingDelta = lastMonthSaving>0 ? Math.round(((monthSaving-lastMonthSaving)/lastMonthSaving)*100) : null;
 
-  return { thisMonth, cashInHand, monthBorrowed, monthRepaid, openingBalance, openingCarry: curM.carry, openingFrom: curM.prevKey || null, accountBalances: accountBalances(), monthClearance, monthExpenseReal, leftover, monthWithdrawn, monthSavingFromCash, monthIncome, monthExpense, monthSaving, monthLeftover, byCat, goalProgress, netByCategory, totalSaving, totalSavingFromCash, totalSavingExternal, totalWithdrawn, totalIncome, days, months, tax80c, fy, expenseDelta, savingDelta };
+  return { thisMonth, cashInHand, monthBorrowed, monthRepaid, monthLent, monthCollected, openingBalance, openingCarry: curM.carry, openingFrom: curM.prevKey || null, accountBalances: accountBalances(), monthClearance, monthExpenseReal, leftover, monthWithdrawn, monthSavingFromCash, monthIncome, monthExpense, monthSaving, monthLeftover, byCat, goalProgress, netByCategory, totalSaving, totalSavingFromCash, totalSavingExternal, totalWithdrawn, totalIncome, days, months, tax80c, fy, expenseDelta, savingDelta };
 }
 
 // The automatic "Previous balance" expense (calculated, so it can never go stale)
@@ -322,17 +330,19 @@ function buildLedger() {
     const withdrawn = mt.filter(t=>t.type==="withdrawal").reduce((s,t)=>s+t.amount,0);
     const borrowed = mt.filter(t=>t.type==="borrow").reduce((s,t)=>s+t.amount,0);
     const repaid = mt.filter(t=>t.type==="repay").reduce((s,t)=>s+t.amount,0);
+    const lent = mt.filter(t=>t.type==="lend").reduce((s,t)=>s+t.amount,0);
+    const collected = mt.filter(t=>t.type==="collect").reduce((s,t)=>s+t.amount,0);
     const opening = running;
     // A negative balance from the previous month is cleared as an expense in this month.
     // (Cash is unchanged: that shortfall is already inside the running balance.)
     const first = prevKey === null;
     const clearance = first ? 0 : Math.max(0, -opening);
     const carry = first ? opening : Math.max(0, opening);
-    const closing = round2(opening + income - expense - saved + withdrawn + borrowed - repaid);
+    const closing = round2(opening + income - expense - saved + withdrawn + borrowed - repaid - lent + collected);
     running = closing;
     const rows = sortTxns(mt);
     if (clearance > 0 && prevKey) rows.push(autoEntry(key, prevKey, clearance));
-    out.push({ key, prevKey, opening, carry, clearance, closing, income, expense, spent: expense + clearance, saved, withdrawn, borrowed, repaid, txns: rows });
+    out.push({ key, prevKey, opening, carry, clearance, closing, income, expense, spent: expense + clearance, saved, withdrawn, borrowed, repaid, lent, collected, txns: rows });
     prevKey = key;
   });
   return out.reverse(); // newest first
@@ -510,6 +520,8 @@ function reconcileCard(stats) {
   if (stats.monthWithdrawn) h += row("Withdrawn from savings", stats.monthWithdrawn, "+", "var(--withdraw)");
   if (stats.monthBorrowed) h += row("Borrowed", stats.monthBorrowed, "+", "var(--loan)");
   if (stats.monthRepaid) h += row("Loan principal repaid", stats.monthRepaid, "\u2212", "var(--loan)");
+  if (stats.monthLent) h += row("Lent out", stats.monthLent, "\u2212", "var(--loan)");
+  if (stats.monthCollected) h += row("Lent money collected", stats.monthCollected, "+", "var(--loan)");
   h += `<div style="display:flex;justify-content:space-between;padding-top:9px;margin-top:6px;border-top:1px solid var(--line);font-size:13px;font-weight:700"><span>Left over</span><span class="num" style="color:${stats.leftover<0?'var(--danger)':'var(--ink)'}">${fmtINR(stats.leftover)}</span></div></div>`;
   return h;
 }
@@ -521,7 +533,7 @@ function safeToSpendCard(stats) {
   const daysLeft = daysInMonth - now.getDate() + 1;
   const pending = DB.recurring.filter(r => r.lastLoggedMonth !== stats.thisMonth);
   const pendingOut = pending.filter(r => r.type === "expense" || (r.type === "saving" && r.source !== "external")).reduce((s,r)=>s+r.amount,0);
-  const loanDue = DB.goals.loans.filter(l => l.status !== "closed").reduce((sum, l) => sum + loanStats(l).interestDue, 0);
+  const loanDue = openLoans().reduce((sum, o) => sum + o.s.interestDue, 0); // interest you owe (not interest owed to you)
   const pendingAll = pendingOut + loanDue; // recurring bills + loan interest you already owe
   const safe = stats.leftover - pendingAll;
   const rate = stats.monthIncome > 0 ? Math.round((stats.monthSavingFromCash / stats.monthIncome) * 100) : null; // saved out of income
@@ -663,7 +675,7 @@ function viewHistory() {
   const f = UI.histFilter;
   const chip = (k, label) => `<button class="chip ${f===k?'on':''}" onclick="setHistFilter('${k}')">${label}</button>`;
   let html = `<div class="chips">${chip('all','All')}${chip('income','Income')}${chip('expense','Spend')}${chip('saving','Savings')}${chip('transfer','Transfers')}${chip('loan','Loans')}</div>`;
-  const match = (t) => f==="all" || (f==="saving" ? (t.type==="saving"||t.type==="withdrawal") : f==="loan" ? (t.type==="borrow"||t.type==="repay"||!!t.loanId) : t.type===f);
+  const match = (t) => f==="all" || (f==="saving" ? (t.type==="saving"||t.type==="withdrawal") : f==="loan" ? (t.type==="borrow"||t.type==="repay"||t.type==="lend"||t.type==="collect"||!!t.loanId) : t.type===f);
   ledger.forEach(m => {
     const rows = m.txns.filter(match);
     if (f !== "all" && !rows.length) return;
@@ -672,7 +684,7 @@ function viewHistory() {
         <p style="font-size:14px;font-weight:700;margin:0">${esc(monthLong(m.key))}</p>
         <p style="font-size:11px;color:var(--ink-soft);margin:0">Closing <span class="num" style="font-weight:700;color:${m.closing<0?'var(--danger)':'var(--ink)'}">${fmtINR(m.closing)}</span></p>
       </div>
-      <p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">${m.carry!==0?`${m.prevKey?"Brought fwd":"Opening"} ${fmtINR(m.carry)} \u00b7 `:""}In ${fmtINR(m.income + m.withdrawn + m.borrowed)} \u00b7 Out ${fmtINR(m.spent + m.saved + m.repaid)}</p>`;
+      <p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">${m.carry!==0?`${m.prevKey?"Brought fwd":"Opening"} ${fmtINR(m.carry)} \u00b7 `:""}In ${fmtINR(m.income + m.withdrawn + m.borrowed + m.collected)} \u00b7 Out ${fmtINR(m.spent + m.saved + m.repaid + m.lent)}</p>`;
     if (!rows.length) html += `<p class="muted" style="margin:6px 0">Nothing logged.</p>`;
     rows.forEach(t => html += txnRow(t, true));
     if (f === "all" && m.carry !== 0) {
@@ -900,21 +912,34 @@ function viewAbout() {
         <span class="chev">${icon('chevron',14)}</span>
       </a>
     </div>
+    ${AUTH.user ? `<div class="card">
+      ${sectionLabel("Account & device","user")}
+      <p style="font-size:13px;margin:0 0 12px;word-break:break-all">${esc(AUTH.user.email || "")}</p>
+      <button class="btn-ghost" style="width:100%;margin-bottom:10px" onclick="doSignOut()">Sign out</button>
+      <button class="btn-ghost" style="width:100%" onclick="resetThisDevice()">Reset this device</button>
+      <p style="font-size:11px;color:var(--ink-faint);margin:6px 0 12px">Signs you out and clears everything stored on this device, like clearing app data, so the app starts fresh. Your cloud data is safe and returns when you sign in again.</p>
+      <button class="btn-ghost" style="width:100%;color:var(--danger);border-color:var(--danger)" onclick="clearAllData()">Erase all my data</button>
+      <p style="font-size:11px;color:var(--ink-faint);margin:6px 0 0">Permanently deletes your data from the cloud and every device. Download a backup first (Goals tab).</p>
+    </div>` : ""}
     <div class="card">
       ${sectionLabel("What each tab tracks")}
       <p style="font-size:12.5px;color:var(--ink-soft);line-height:1.7;margin:0">
         <strong style="color:var(--ink)">Home</strong> — your accounts, what you can safely spend, and this month line by line.<br/>
         <strong style="color:var(--ink)">Income / Spend</strong> — everything coming in and going out, with quick-add presets.<br/>
         <strong style="color:var(--ink)">Savings</strong> — SIPs, PPF, ELSS and your own goals, with a withdraw-back option.<br/>
-        <strong style="color:var(--ink)">Loans</strong> — money you borrowed, interest, repayments, and when you can close it.<br/>
+        <strong style="color:var(--ink)">Loans</strong> — money you borrowed or lent, interest, repayments, and when you can close a loan.<br/>
         <strong style="color:var(--ink)">History</strong> — a month-by-month log with balances carried forward.<br/>
         <strong style="color:var(--ink)">Goals</strong> — budgets, savings goals, 80C progress, recurring bills, categories and export.
       </p>
     </div>`;
 }
 
-/* ==================== loans (money you borrowed) ==================== */
+/* ==================== loans (money you borrowed or lent) ==================== */
+// Each loan has `dir`: "borrow" (you owe; the default for older loans) or "lend" (owed to you).
+// `lender` holds the other person's name in both cases.
 function loanById(id) { return (DB.goals.loans || []).find(l => l.id === id); }
+function isLend(loan) { return !!loan && loan.dir === "lend"; }
+function loanTypes(loan) { return isLend(loan) ? { out: "lend", back: "collect", interest: "income" } : { out: "borrow", back: "repay", interest: "expense" }; }
 // Same day next month(s); 31 Jan + 1 month = 28/29 Feb
 function addMonthsIso(iso, n) {
   const [y, m, d] = iso.split("-").map(Number);
@@ -923,11 +948,12 @@ function addMonthsIso(iso, n) {
   const day = Math.min(d, new Date(ty, tm + 1, 0).getDate());
   return ty + "-" + String(tm + 1).padStart(2, "0") + "-" + String(day).padStart(2, "0");
 }
-// Interest is charged every full month on what you still owed at the start of that month
+// Interest is charged every full month on what was still outstanding at the start of that month
 function loanStats(loan) {
   const today = todayIso();
   const asOf = (loan.status === "closed" && loan.closedDate && loan.closedDate < today) ? loan.closedDate : today;
-  const reps = DB.txns.filter(t => t.type === "repay" && t.loanId === loan.id);
+  const ty = loanTypes(loan);
+  const reps = DB.txns.filter(t => t.type === ty.back && t.loanId === loan.id);
   const repaid = reps.reduce((sum, t) => sum + t.amount, 0);
   const outstanding = Math.max(0, loan.principal - repaid);
   const rate = Number(loan.rate) || 0;
@@ -941,14 +967,14 @@ function loanStats(loan) {
       cycles = n;
     }
   }
-  const interestPaid = DB.txns.filter(t => t.loanId === loan.id && t.type === "expense").reduce((sum, t) => sum + t.amount, 0);
+  const interestPaid = DB.txns.filter(t => t.loanId === loan.id && t.type === ty.interest).reduce((sum, t) => sum + t.amount, 0);
   let interestDue = accrued - interestPaid - (loan.waived || 0);
   interestDue = interestDue < 1 ? 0 : Math.round(interestDue);
   const monthly = Math.round(outstanding * rate / 100);
   const nextDate = (rate > 0 && outstanding > 0 && loan.status !== "closed") ? addMonthsIso(loan.date, cycles + 1) : null;
   return { outstanding, repaid, accrued, interestPaid, interestDue, monthly, nextDate, rate, totalOwed: outstanding + interestDue };
 }
-// A loan closes itself once nothing is owed, and reopens if a payment is undone
+// A loan closes itself once nothing is outstanding, and reopens if a payment is undone
 function refreshLoanStatus(loan) {
   const s = loanStats(loan);
   if (s.outstanding === 0 && s.interestDue === 0) {
@@ -958,7 +984,9 @@ function refreshLoanStatus(loan) {
     }
   } else if (loan.status === "closed") { loan.status = "open"; loan.closedDate = null; }
 }
-function openLoans() { return DB.goals.loans.filter(l => l.status !== "closed").map(l => ({ l, s: loanStats(l) })); }
+function openDebts(dir) { return DB.goals.loans.filter(l => l.status !== "closed" && (dir === "lend" ? isLend(l) : !isLend(l))).map(l => ({ l, s: loanStats(l) })); }
+function openLoans() { return openDebts("borrow"); } // money you owe
+function openLends() { return openDebts("lend"); }   // money owed to you
 // Which loans you could close right now with the money in hand. Highest interest comes first, and
 // cash is never "spent" on an interest-free loan while a costlier loan is still out of reach.
 function loanSuggestions(cashInHand) {
@@ -984,24 +1012,58 @@ function suggestionHtml(sg, withButtons) {
 }
 
 function homeLoansCard(stats) {
-  const open = openLoans();
-  if (!open.length) return "";
-  const owed = open.reduce((sum, o) => sum + o.s.outstanding, 0);
-  const due = open.reduce((sum, o) => sum + o.s.interestDue, 0);
-  const sg = loanSuggestions(stats.cashInHand);
-  let h = `<div class="card">${sectionLabel("Money you owe","rupee")}
-    <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="num" style="font-size:20px;font-weight:700">${fmtINR(owed)}</span><span style="font-size:12px;color:var(--ink-soft)">${open.length} open loan${open.length === 1 ? "" : "s"}</span></div>
-    ${due > 0 ? `<p style="font-size:12px;color:var(--danger);margin:4px 0 0">${fmtINR(due)} interest due now</p>` : ""}`;
-  if (sg.canClose.length) h += suggestionHtml({ canClose: sg.canClose.slice(0, 1), short: null }, false);
-  h += `<button class="btn-ghost" style="width:100%;margin-top:12px;padding:9px;font-size:12.5px" onclick="setTab('loans')">Open Loans</button></div>`;
+  const open = openLoans(), lends = openLends();
+  let h = "";
+  if (open.length) {
+    const owed = open.reduce((sum, o) => sum + o.s.outstanding, 0);
+    const due = open.reduce((sum, o) => sum + o.s.interestDue, 0);
+    const sg = loanSuggestions(stats.cashInHand);
+    h += `<div class="card">${sectionLabel("Money you owe","rupee")}
+      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="num" style="font-size:20px;font-weight:700">${fmtINR(owed)}</span><span style="font-size:12px;color:var(--ink-soft)">${open.length} open loan${open.length === 1 ? "" : "s"}</span></div>
+      ${due > 0 ? `<p style="font-size:12px;color:var(--danger);margin:4px 0 0">${fmtINR(due)} interest due now</p>` : ""}`;
+    if (sg.canClose.length) h += suggestionHtml({ canClose: sg.canClose.slice(0, 1), short: null }, false);
+    h += `<button class="btn-ghost" style="width:100%;margin-top:12px;padding:9px;font-size:12.5px" onclick="setLoanView('owe');setTab('loans')">Open Loans</button></div>`;
+  }
+  if (lends.length) {
+    const lent = lends.reduce((sum, o) => sum + o.s.outstanding, 0);
+    const due = lends.reduce((sum, o) => sum + o.s.interestDue, 0);
+    h += `<div class="card">${sectionLabel("Owed to you","rupee")}
+      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="num" style="font-size:20px;font-weight:700">${fmtINR(lent)}</span><span style="font-size:12px;color:var(--ink-soft)">${lends.length} ${lends.length === 1 ? "person" : "people"}</span></div>
+      ${due > 0 ? `<p style="font-size:12px;color:var(--brass);margin:4px 0 0">${fmtINR(due)} interest due to you</p>` : ""}
+      <button class="btn-ghost" style="width:100%;margin-top:12px;padding:9px;font-size:12.5px" onclick="setLoanView('owed');setTab('loans')">Open Loans</button></div>`;
+  }
   return h;
 }
 
 function viewLoans(stats) {
-  const loans = DB.goals.loans;
-  let html = `<button class="btn-primary" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--loan)" onclick="openLoanForm()">${icon('plus',15)} Add a loan</button>`;
-  if (!loans.length) return html + `<div class="card"><p class="muted" style="margin:0">Borrowed money from a friend or a lender? Add it here. It isn't counted as income, it stays on this page until you pay it back, and you can track monthly interest too.</p></div>`;
+  const view = UI.loanView === "owed" ? "owed" : "owe";
+  const chip = (k, label) => `<button class="chip ${view === k ? "on" : ""}" onclick="setLoanView('${k}')">${label}</button>`;
+  let html = `<div class="chips">${chip("owe", "I owe")}${chip("owed", "Owed to me")}</div>`;
+  html += `<button class="btn-primary" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--loan)" onclick="openLoanForm('${view === "owed" ? "lend" : "borrow"}')">${icon("plus",15)} ${view === "owed" ? "Lend money" : "Add a loan"}</button>`;
+  const debts = openLoans(), lends = openLends();
+  if (debts.length && lends.length) {
+    const net = lends.reduce((a, o) => a + o.s.totalOwed, 0) - debts.reduce((a, o) => a + o.s.totalOwed, 0);
+    html += `<div class="card">${sectionLabel("Net position","rupee")}<p style="font-size:13px;margin:0">${net >= 0 ? `Others owe you <strong>${fmtINR(net)}</strong> more than you owe them.` : `You owe <strong>${fmtINR(-net)}</strong> more than others owe you.`}</p></div>`;
+  }
+  return html + (view === "owed" ? owedSection() : oweSection(stats));
+}
+
+function closedLoansHtml(list) {
+  if (!list.length) return "";
+  let html = `<div class="card">${sectionLabel("Closed loans")}`;
+  list.forEach(o => {
+    html += `<div class="row" style="cursor:default"><div><p style="font-size:13px;margin:0">${esc(o.l.lender)}</p><p style="font-size:11.5px;color:var(--ink-soft);margin:0">${fmtINR(o.l.principal)}${o.s.interestPaid ? ` + ${fmtINR(o.s.interestPaid)} interest` : ""} \u00b7 closed ${o.l.closedDate ? fmtDateShort(o.l.closedDate) : ""}</p></div>
+      <div style="display:flex;align-items:center;gap:8px"><button class="btn-ghost" style="padding:5px 10px;font-size:11.5px" onclick="toggleLoanActivity('${o.l.id}')">Details</button><button onclick="deleteLoan('${o.l.id}')" aria-label="Delete loan" style="border:none;background:none;cursor:pointer;padding:3px;color:var(--ink-faint)">${icon("trash",14)}</button></div></div>`;
+    if (UI.loanOpenId === o.l.id) html += loanActivityHtml(o.l);
+  });
+  return html + `</div>`;
+}
+
+function oweSection(stats) {
+  const loans = DB.goals.loans.filter(l => !isLend(l));
+  if (!loans.length) return `<div class="card"><p class="muted" style="margin:0">Borrowed money from a friend or a lender? Add it here. It isn't counted as income, it stays on this page until you pay it back, and you can track monthly interest too.</p></div>`;
   const open = openLoans(), closed = loans.filter(l => l.status === "closed").map(l => ({ l, s: loanStats(l) }));
+  let html = "";
   if (open.length) {
     const owed = open.reduce((sum, o) => sum + o.s.outstanding, 0);
     const due = open.reduce((sum, o) => sum + o.s.interestDue, 0);
@@ -1013,107 +1075,118 @@ function viewLoans(stats) {
     if (sg.canClose.length || sg.short) html += `<div class="card">${sectionLabel("Smart suggestion","bolt")}${suggestionHtml(sg, true)}</div>`;
     open.forEach(o => html += loanCard(o.l, o.s));
   }
-  if (closed.length) {
-    html += `<div class="card">${sectionLabel("Closed loans")}`;
-    closed.forEach(o => {
-      html += `<div class="row" style="cursor:default"><div><p style="font-size:13px;margin:0">${esc(o.l.lender)}</p><p style="font-size:11.5px;color:var(--ink-soft);margin:0">${fmtINR(o.l.principal)}${o.s.interestPaid ? ` + ${fmtINR(o.s.interestPaid)} interest` : ""} \u00b7 closed ${o.l.closedDate ? fmtDateShort(o.l.closedDate) : ""}</p></div>
-        <div style="display:flex;align-items:center;gap:8px"><button class="btn-ghost" style="padding:5px 10px;font-size:11.5px" onclick="toggleLoanActivity('${o.l.id}')">Details</button><button onclick="deleteLoan('${o.l.id}')" aria-label="Delete loan" style="border:none;background:none;cursor:pointer;padding:3px;color:var(--ink-faint)">${icon('trash',14)}</button></div></div>`;
-      if (UI.loanOpenId === o.l.id) html += loanActivityHtml(o.l);
-    });
-    html += `</div>`;
+  return html + closedLoansHtml(closed);
+}
+
+function owedSection() {
+  const loans = DB.goals.loans.filter(l => isLend(l));
+  if (!loans.length) return `<div class="card"><p class="muted" style="margin:0">Lent money to a friend? Add it here so you don't forget. It isn't counted as spending, it stays on this page until it comes back, and you can track monthly interest too.</p></div>`;
+  const open = openLends(), closed = loans.filter(l => l.status === "closed").map(l => ({ l, s: loanStats(l) }));
+  let html = "";
+  if (open.length) {
+    const lent = open.reduce((sum, o) => sum + o.s.outstanding, 0);
+    const due = open.reduce((sum, o) => sum + o.s.interestDue, 0);
+    const monthly = open.reduce((sum, o) => sum + o.s.monthly, 0);
+    html += `<div class="card">${sectionLabel("Owed to you","rupee")}
+      <p class="num" style="font-size:26px;font-weight:700;margin:0">${fmtINR(lent + due)}</p>
+      <p style="font-size:12px;color:var(--ink-soft);margin:4px 0 0">${fmtINR(lent)} lent${due > 0 ? ` + <span style="color:var(--brass)">${fmtINR(due)} interest due to you</span>` : ""}${monthly > 0 ? ` \u00b7 earns ${fmtINR(monthly)} a month` : ""}</p></div>`;
+    open.forEach(o => html += loanCard(o.l, o.s));
   }
-  return html;
+  return html + closedLoansHtml(closed);
 }
 
 function loanActivityHtml(loan) {
   const acts = DB.txns.filter(t => t.loanId === loan.id).sort((a, b) => b.date.localeCompare(a.date));
   if (!acts.length) return `<p class="muted" style="margin:8px 0">No activity yet.</p>`;
-  const label = (t) => t.type === "borrow" ? "Borrowed" : t.type === "repay" ? "Principal repaid" : "Interest paid";
-  return `<div style="background:var(--paper);border-radius:10px;padding:4px 10px;margin:8px 0">${acts.map(t => `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;font-size:12.5px"><span>${label(t)} <span style="color:var(--ink-faint)">\u00b7 ${fmtDateShort(t.date)}</span></span><span style="display:flex;align-items:center;gap:8px"><span class="num" style="font-weight:700">${fmtINR(t.amount)}</span><button onclick="undoLoanTxn('${t.id}')" aria-label="Remove" style="border:none;background:none;cursor:pointer;padding:2px;color:var(--ink-faint)">${icon('trash',13)}</button></span></div>`).join("")}</div>`;
+  const label = (t) => ({ borrow: "Borrowed", repay: "Principal repaid", lend: "Lent", collect: "Principal collected", expense: "Interest paid", income: "Interest received" })[t.type] || t.type;
+  return `<div style="background:var(--paper);border-radius:10px;padding:4px 10px;margin:8px 0">${acts.map(t => `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;font-size:12.5px"><span>${label(t)} <span style="color:var(--ink-faint)">\u00b7 ${fmtDateShort(t.date)}</span></span><span style="display:flex;align-items:center;gap:8px"><span class="num" style="font-weight:700">${fmtINR(t.amount)}</span><button onclick="undoLoanTxn('${t.id}')" aria-label="Remove" style="border:none;background:none;cursor:pointer;padding:2px;color:var(--ink-faint)">${icon("trash",13)}</button></span></div>`).join("")}</div>`;
 }
 
 function loanCard(loan, s) {
-  const hasRate = s.rate > 0;
+  const hasRate = s.rate > 0, lend = isLend(loan);
   return `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
       <div style="min-width:0"><p style="font-size:15px;font-weight:700;margin:0">${esc(loan.lender)}</p>
-        <p style="font-size:11.5px;color:var(--ink-soft);margin:2px 0 0">Borrowed ${fmtINR(loan.principal)} on ${fmtDateShort(loan.date)}${loan.note ? " \u00b7 " + esc(loan.note) : ""}</p></div>
+        <p style="font-size:11.5px;color:var(--ink-soft);margin:2px 0 0">${lend ? "Lent" : "Borrowed"} ${fmtINR(loan.principal)} on ${fmtDateShort(loan.date)}${loan.note ? " \u00b7 " + esc(loan.note) : ""}</p></div>
       <span class="pill" style="background:${hasRate ? "var(--brass-tint)" : "var(--saving-tint)"};color:${hasRate ? "var(--brass)" : "var(--saving)"};flex-shrink:0">${hasRate ? esc(String(loan.rate)) + "% / month" : "No interest"}</span>
     </div>
     <div class="flex-gap" style="margin-bottom:8px">
-      <div class="metric" style="flex:1"><p style="font-size:11px;color:var(--ink-soft);margin:0 0 3px">You still owe</p><p class="num" style="font-size:17px;font-weight:700;margin:0">${fmtINR(s.outstanding)}</p></div>
-      ${hasRate ? `<div class="metric" style="flex:1"><p style="font-size:11px;color:var(--ink-soft);margin:0 0 3px">Interest due now</p><p class="num" style="font-size:17px;font-weight:700;margin:0;color:${s.interestDue > 0 ? "var(--danger)" : "var(--ink)"}">${fmtINR(s.interestDue)}</p></div>` : ""}
+      <div class="metric" style="flex:1"><p style="font-size:11px;color:var(--ink-soft);margin:0 0 3px">${lend ? "Still owed to you" : "You still owe"}</p><p class="num" style="font-size:17px;font-weight:700;margin:0">${fmtINR(s.outstanding)}</p></div>
+      ${hasRate ? `<div class="metric" style="flex:1"><p style="font-size:11px;color:var(--ink-soft);margin:0 0 3px">${lend ? "Interest due to you" : "Interest due now"}</p><p class="num" style="font-size:17px;font-weight:700;margin:0;color:${s.interestDue > 0 ? (lend ? "var(--brass)" : "var(--danger)") : "var(--ink)"}">${fmtINR(s.interestDue)}</p></div>` : ""}
     </div>
-    ${hasRate && s.nextDate ? `<p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 4px">Costs ${fmtINR(s.monthly)} every month \u00b7 next interest on ${fmtDateShort(s.nextDate)}</p>` : ""}
-    ${s.repaid || s.interestPaid ? `<p style="font-size:11.5px;color:var(--ink-faint);margin:0 0 4px">Paid so far: ${fmtINR(s.repaid)} principal${hasRate ? ` \u00b7 ${fmtINR(s.interestPaid)} interest` : ""}</p>` : ""}
+    ${hasRate && s.nextDate ? `<p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 4px">${lend ? "Earns" : "Costs"} ${fmtINR(s.monthly)} every month \u00b7 next interest on ${fmtDateShort(s.nextDate)}</p>` : ""}
+    ${s.repaid || s.interestPaid ? `<p style="font-size:11.5px;color:var(--ink-faint);margin:0 0 4px">${lend ? "Received" : "Paid"} so far: ${fmtINR(s.repaid)} principal${hasRate ? ` \u00b7 ${fmtINR(s.interestPaid)} interest` : ""}</p>` : ""}
     <div class="flex-gap" style="margin-top:10px;flex-wrap:wrap">
-      ${hasRate ? `<button class="btn-ghost" style="flex:1;padding:9px 6px;font-size:12.5px" onclick="openLoanPay('${loan.id}','interest')">Pay interest</button>` : ""}
-      <button class="btn-ghost" style="flex:1;padding:9px 6px;font-size:12.5px" onclick="openLoanPay('${loan.id}','principal')">Repay</button>
-      <button class="btn-primary" style="flex:1;padding:9px 6px;font-size:12.5px;width:auto;background:var(--loan)" onclick="openLoanPay('${loan.id}','close')">Close loan</button>
+      ${hasRate ? `<button class="btn-ghost" style="flex:1;padding:9px 6px;font-size:12.5px" onclick="openLoanPay('${loan.id}','interest')">${lend ? "Got interest" : "Pay interest"}</button>` : ""}
+      <button class="btn-ghost" style="flex:1;padding:9px 6px;font-size:12.5px" onclick="openLoanPay('${loan.id}','principal')">${lend ? "Got money back" : "Repay"}</button>
+      <button class="btn-primary" style="flex:1;padding:9px 6px;font-size:12.5px;width:auto;background:var(--loan)" onclick="openLoanPay('${loan.id}','close')">${lend ? "Mark as paid" : "Close loan"}</button>
     </div>
     <div style="display:flex;justify-content:space-between;margin-top:10px">
       <button onclick="toggleLoanActivity('${loan.id}')" style="background:none;border:none;color:var(--ink-soft);font-size:12px;cursor:pointer;padding:0;font-family:inherit">${UI.loanOpenId === loan.id ? "Hide activity" : "Show activity"}</button>
-      <button onclick="deleteLoan('${loan.id}')" aria-label="Delete loan" style="border:none;background:none;cursor:pointer;padding:2px;color:var(--ink-faint)">${icon('trash',14)}</button>
+      <button onclick="deleteLoan('${loan.id}')" aria-label="Delete loan" style="border:none;background:none;cursor:pointer;padding:2px;color:var(--ink-faint)">${icon("trash",14)}</button>
     </div>
     ${UI.loanOpenId === loan.id ? loanActivityHtml(loan) : ""}
   </div>`;
 }
 
 function viewLoanSheet() {
+  const lend = UI.loanFormDir === "lend";
   const accts = DB.goals.accounts;
   const def = acctById(UI.lastAccount) ? UI.lastAccount : DB.goals.defaultAccount;
   return `<div class="sheet-backdrop" onclick="closeLoanForm()"><div class="sheet" onclick="event.stopPropagation()">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-      <p style="font-size:16px;font-weight:700;margin:0">Add a loan</p>
-      <button onclick="closeLoanForm()" aria-label="Close" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);padding:4px">${icon('close',18)}</button>
+      <p style="font-size:16px;font-weight:700;margin:0">${lend ? "Lend money" : "Add a loan"}</p>
+      <button onclick="closeLoanForm()" aria-label="Close" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);padding:4px">${icon("close",18)}</button>
     </div>
-    <p class="muted" style="margin:0 0 14px">Money you borrowed. It is not counted as income, and you'll see it here until it's paid back.</p>
+    <p class="muted" style="margin:0 0 14px">${lend ? "Money you gave to someone. It isn't counted as spending, and you'll see it here until it's paid back to you." : "Money you borrowed. It is not counted as income, and you'll see it here until it's paid back."}</p>
     <div style="display:flex;flex-direction:column;gap:12px">
-      <div><label class="fl">Who did you borrow from?</label><input id="loanLender" type="text" placeholder="e.g. Ravi, Mom, Muthoot"/></div>
+      <div><label class="fl">${lend ? "Who did you lend to?" : "Who did you borrow from?"}</label><input id="loanLender" type="text" placeholder="${lend ? "e.g. Arun, cousin" : "e.g. Ravi, Mom, Muthoot"}"/></div>
       <div class="flex-gap">
         <div style="flex:1"><label class="fl">Amount (\u20B9)</label><input id="loanAmount" type="number" min="0" step="100" placeholder="0" oninput="updateLoanPreview()"/></div>
-        <div style="flex:1"><label class="fl">Date borrowed</label><input id="loanDate" type="date" value="${todayIso()}"/></div>
+        <div style="flex:1"><label class="fl">Date</label><input id="loanDate" type="date" value="${todayIso()}"/></div>
       </div>
       <div><label class="fl">Interest</label><select id="loanType" onchange="onLoanTypeChange()"><option value="none">No interest (friend / family)</option><option value="monthly">Monthly interest</option></select></div>
-      <div id="loanRateWrap" style="display:none"><label class="fl">Interest per month (%)</label><input id="loanRate" type="number" min="0" step="0.1" placeholder="e.g. 2" oninput="updateLoanPreview()"/><p id="loanPreview" style="font-size:11.5px;color:var(--ink-soft);margin:6px 0 0"></p><p style="font-size:11px;color:var(--ink-faint);margin:4px 0 0">Charged every full month on what you still owe. You can pay just the interest each month and keep the principal.</p></div>
-      <div><label class="fl">Money received into</label><select id="loanAccount">${accts.map(a => `<option value="${esc(a.id)}" ${a.id === def ? "selected" : ""}>${esc(a.name)}</option>`).join("")}<option value="">Don't add to my accounts (I already had this money)</option></select></div>
-      <div><label class="fl">Note (optional)</label><input id="loanNote" type="text" placeholder="e.g. for laptop"/></div>
+      <div id="loanRateWrap" style="display:none"><label class="fl">Interest per month (%)</label><input id="loanRate" type="number" min="0" step="0.1" placeholder="e.g. 2" oninput="updateLoanPreview()"/><p id="loanPreview" style="font-size:11.5px;color:var(--ink-soft);margin:6px 0 0"></p><p style="font-size:11px;color:var(--ink-faint);margin:4px 0 0">Charged every full month on what is still outstanding. ${lend ? "They can pay just the interest each month and keep the principal." : "You can pay just the interest each month and keep the principal."}</p></div>
+      <div><label class="fl">${lend ? "Money paid from" : "Money received into"}</label><select id="loanAccount">${accts.map(a => `<option value="${esc(a.id)}" ${a.id === def ? "selected" : ""}>${esc(a.name)}</option>`).join("")}<option value="">${lend ? "Don't take from my accounts (I lent it before tracking)" : "Don't add to my accounts (I already had this money)"}</option></select></div>
+      <div><label class="fl">Note (optional)</label><input id="loanNote" type="text" placeholder="${lend ? "e.g. for his fees" : "e.g. for laptop"}"/></div>
       <p id="loanError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
     </div>
-    <div class="flex-gap" style="margin-top:18px"><button onclick="closeLoanForm()" class="btn-ghost" style="flex:1">Cancel</button><button onclick="submitLoan()" class="btn-primary" style="flex:1;background:var(--loan)">Add loan</button></div>
+    <div class="flex-gap" style="margin-top:18px"><button onclick="closeLoanForm()" class="btn-ghost" style="flex:1">Cancel</button><button onclick="submitLoan()" class="btn-primary" style="flex:1;background:var(--loan)">${lend ? "Add" : "Add loan"}</button></div>
   </div></div>`;
 }
 
 function viewLoanPaySheet() {
   const p = UI.loanPay, loan = loanById(p.id);
   if (!loan) return "";
+  const lend = isLend(loan);
   const s = loanStats(loan);
   const def = acctById(UI.lastAccount) ? UI.lastAccount : DB.goals.defaultAccount;
-  const titles = { interest: "Pay interest", principal: "Repay what you owe", close: "Close this loan" };
+  const titles = lend ? { interest: "Interest received", principal: "Money collected back", close: "Mark as fully paid back" } : { interest: "Pay interest", principal: "Repay what you owe", close: "Close this loan" };
   let body = "";
   if (p.mode === "interest") {
-    body = `<p class="muted" style="margin:0 0 12px">Interest only. You'll still owe ${fmtINR(s.outstanding)} afterwards.</p>
+    body = `<p class="muted" style="margin:0 0 12px">Interest only. ${lend ? "They'll still owe you" : "You'll still owe"} ${fmtINR(s.outstanding)} afterwards.</p>
       <div><label class="fl">Interest amount (\u20B9)</label><input id="lpAmount" type="number" min="0" step="1" value="${s.interestDue || s.monthly}"/></div>`;
   } else if (p.mode === "principal") {
-    body = `<p class="muted" style="margin:0 0 12px">You owe ${fmtINR(s.outstanding)}${s.interestDue ? ` plus ${fmtINR(s.interestDue)} interest (paid separately)` : ""}.</p>
-      <div><label class="fl">Amount to repay (\u20B9)</label><input id="lpAmount" type="number" min="0" step="1" value="${s.outstanding}"/></div>`;
+    body = `<p class="muted" style="margin:0 0 12px">${lend ? "They owe you" : "You owe"} ${fmtINR(s.outstanding)}${s.interestDue ? ` plus ${fmtINR(s.interestDue)} interest (${lend ? "received" : "paid"} separately)` : ""}.</p>
+      <div><label class="fl">${lend ? "Amount collected" : "Amount to repay"} (\u20B9)</label><input id="lpAmount" type="number" min="0" step="1" value="${s.outstanding}"/></div>`;
   } else {
-    body = `<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:var(--ink-soft)">Borrowed amount still owed</span><span class="num" style="font-weight:700">${fmtINR(s.outstanding)}</span></div>
-      ${s.rate > 0 ? `<div style="margin-top:8px"><label class="fl">Interest to pay now (\u20B9)</label><input id="lpInterest" type="number" min="0" step="1" value="${s.interestDue}" oninput="updateCloseTotal()"/><p style="font-size:11px;color:var(--ink-faint);margin:5px 0 0">Interest due is ${fmtINR(s.interestDue)}. Lower it if the lender waived some.</p></div>` : ""}
-      <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;padding-top:10px;margin-top:10px;border-top:1px solid var(--line)"><span>Total to pay</span><span class="num" id="lpTotal">${fmtINR(s.totalOwed)}</span></div>`;
+    body = `<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:var(--ink-soft)">${lend ? "Still owed to you" : "Borrowed amount still owed"}</span><span class="num" style="font-weight:700">${fmtINR(s.outstanding)}</span></div>
+      ${s.rate > 0 ? `<div style="margin-top:8px"><label class="fl">${lend ? "Interest received now" : "Interest to pay now"} (\u20B9)</label><input id="lpInterest" type="number" min="0" step="1" value="${s.interestDue}" oninput="updateCloseTotal()"/><p style="font-size:11px;color:var(--ink-faint);margin:5px 0 0">Interest due is ${fmtINR(s.interestDue)}. Lower it if ${lend ? "you waived" : "the lender waived"} some.</p></div>` : ""}
+      <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;padding-top:10px;margin-top:10px;border-top:1px solid var(--line)"><span>${lend ? "Total to receive" : "Total to pay"}</span><span class="num" id="lpTotal">${fmtINR(s.totalOwed)}</span></div>`;
   }
+  const btn = lend ? { close: "Collect & close", interest: "Receive interest", principal: "Collect" } : { close: "Pay & close", interest: "Pay interest", principal: "Repay" };
   return `<div class="sheet-backdrop" onclick="closeLoanPay()"><div class="sheet" onclick="event.stopPropagation()">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
       <p style="font-size:16px;font-weight:700;margin:0">${titles[p.mode]} \u00b7 ${esc(loan.lender)}</p>
-      <button onclick="closeLoanPay()" aria-label="Close" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);padding:4px">${icon('close',18)}</button>
+      <button onclick="closeLoanPay()" aria-label="Close" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);padding:4px">${icon("close",18)}</button>
     </div>
     <div style="display:flex;flex-direction:column;gap:12px;margin-top:10px">
       ${body}
-      <div><label class="fl">Pay from</label><select id="lpAccount">${accountOptions(def)}</select></div>
+      <div><label class="fl">${lend ? "Receive into" : "Pay from"}</label><select id="lpAccount">${accountOptions(def)}</select></div>
       <div><label class="fl">Date</label><input id="lpDate" type="date" value="${todayIso()}"/></div>
       <p id="lpError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
     </div>
-    <div class="flex-gap" style="margin-top:18px"><button onclick="closeLoanPay()" class="btn-ghost" style="flex:1">Cancel</button><button onclick="submitLoanPay()" class="btn-primary" style="flex:1;background:var(--loan)">${p.mode === "close" ? "Pay & close" : p.mode === "interest" ? "Pay interest" : "Repay"}</button></div>
+    <div class="flex-gap" style="margin-top:18px"><button onclick="closeLoanPay()" class="btn-ghost" style="flex:1">Cancel</button><button onclick="submitLoanPay()" class="btn-primary" style="flex:1;background:var(--loan)">${btn[p.mode]}</button></div>
   </div></div>`;
 }
 
@@ -1306,6 +1379,8 @@ function viewAuth() {
       <div class="auth-mobile-logo"><img src="icon-192.png" alt="PennyLog"/><span>PennyLog</span></div>
       <p class="auth-eyebrow">${isLogin?"Welcome back":"Get started"}</p>
       <p class="auth-title">${isLogin?"Log in to your ledger":"Create your account"}</p>
+      <button type="button" class="btn-google" onclick="doGoogleSignIn()"><svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4.1 7.1-10.1 7.1-17.5z"/><path fill="#FBBC05" d="M10.5 28.7a14.5 14.5 0 0 1 0-9.4l-7.9-6.1a24 24 0 0 0 0 21.6l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.9 2.3-8.4 2.3-6.3 0-11.6-4.1-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg> Continue with Google</button>
+      <div class="auth-divider"><div class="line"></div><span>or use email</span><div class="line"></div></div>
       <div style="display:flex;flex-direction:column;gap:14px">
         <div><label class="fl">Email</label><input id="authEmail" type="email" placeholder="you@example.com" autocomplete="email"/></div>
         <div><label class="fl">Password</label>
@@ -1325,6 +1400,11 @@ function viewAuth() {
       <p style="font-size:11px;color:var(--ink-faint);margin:18px 0 0">Your data is stored under this account and synced automatically across any device where you log in.</p>
     </div>
   </div></div>`;
+}
+function doGoogleSignIn() {
+  if (!window.__fb || !window.__fb.signInWithGoogle) { AUTH.error = "Google sign-in isn't ready yet. Try again in a moment."; render(); return; }
+  AUTH.error = "";
+  window.__fb.signInWithGoogle().catch((e) => { AUTH.error = friendlyAuthError(e && e.code); render(); });
 }
 function togglePwVisible() {
   UI.pwVisible = !UI.pwVisible;
@@ -1447,6 +1527,13 @@ function friendlyAuthError(code) {
     "auth/invalid-credential": "Email or password is incorrect.",
     "auth/email-already-in-use": "An account already exists — try logging in.",
     "auth/weak-password": "Password should be at least 6 characters.",
+    "auth/popup-closed-by-user": "Google sign-in was cancelled.",
+    "auth/cancelled-popup-request": "Google sign-in was cancelled.",
+    "auth/popup-blocked": "Your browser blocked the Google window. Allow pop-ups and try again.",
+    "auth/unauthorized-domain": "This site isn't allowed for sign-in yet. Add it under Authentication > Settings > Authorized domains in Firebase.",
+    "auth/operation-not-allowed": "That sign-in method isn't turned on in Firebase yet.",
+    "auth/account-exists-with-different-credential": "That email already has an account with a password. Log in with your password.",
+    "auth/network-request-failed": "No internet connection.",
   };
   return map[code] || "Something went wrong. Try again.";
 }
@@ -1810,9 +1897,10 @@ function doLogRecurring(id) {
   const stats = computeStats(); logRecurring(id, stats.thisMonth); render();
 }
 
-// ---- loans ----
-function openLoanForm() { UI.showLoanForm = true; render(); }
+// ---- loans (borrowed and lent) ----
+function openLoanForm(dir) { UI.loanFormDir = dir === "lend" ? "lend" : "borrow"; UI.showLoanForm = true; render(); }
 function closeLoanForm() { UI.showLoanForm = false; render(); }
+function setLoanView(v) { UI.loanView = v === "owed" ? "owed" : "owe"; if (UI.tab === "loans") render(); }
 function onLoanTypeChange() {
   const monthly = document.getElementById("loanType").value === "monthly";
   document.getElementById("loanRateWrap").style.display = monthly ? "block" : "none";
@@ -1824,6 +1912,7 @@ function updateLoanPreview() {
   document.getElementById("loanPreview").textContent = amt > 0 && rate > 0 ? `That's ${fmtINR(Math.round(amt * rate / 100))} of interest every month.` : "";
 }
 function submitLoan() {
+  const dir = UI.loanFormDir === "lend" ? "lend" : "borrow";
   const lender = document.getElementById("loanLender").value.trim();
   const amount = Number(document.getElementById("loanAmount").value);
   const date = document.getElementById("loanDate").value;
@@ -1833,13 +1922,17 @@ function submitLoan() {
   const note = document.getElementById("loanNote").value.trim();
   const err = document.getElementById("loanError");
   const fail = (m) => { err.textContent = m; err.style.display = "block"; };
-  if (!lender) return fail("Who did you borrow from?");
+  if (!lender) return fail(dir === "lend" ? "Who did you lend to?" : "Who did you borrow from?");
   if (!amount || amount <= 0) return fail("Enter an amount greater than 0.");
-  if (!date) return fail("Pick the date you borrowed it.");
+  if (!date) return fail("Pick a date.");
   if (monthly && !(rate > 0)) return fail("Enter the monthly interest rate, or choose No interest.");
-  const loan = { id: uid(), lender, principal: amount, date, rate: monthly ? rate : 0, note, status: "open", closedDate: null };
+  if (dir === "lend" && account) {
+    const warn = overdrawMessage(account, amount);
+    if (warn && !confirm(warn + " Lend it anyway?")) return;
+  }
+  const loan = { id: uid(), dir, lender, principal: amount, date, rate: monthly ? rate : 0, note, status: "open", closedDate: null };
   DB.goals.loans.unshift(loan);
-  if (account) { DB.txns.unshift({ id: uid(), type: "borrow", amount, category: "Loan", date, loanId: loan.id, account, note: lender }); UI.lastAccount = account; }
+  if (account) { DB.txns.unshift({ id: uid(), type: dir === "lend" ? "lend" : "borrow", amount, category: "Loan", date, loanId: loan.id, account, note: lender }); UI.lastAccount = account; }
   UI.showLoanForm = false;
   saveDB(); render();
 }
@@ -1852,6 +1945,7 @@ function updateCloseTotal() {
 }
 function submitLoanPay() {
   const p = UI.loanPay; const loan = p && loanById(p.id); if (!loan) return;
+  const lend = isLend(loan);
   const s = loanStats(loan);
   const account = document.getElementById("lpAccount").value;
   const date = document.getElementById("lpDate").value;
@@ -1863,16 +1957,18 @@ function submitLoanPay() {
   else if (p.mode === "principal") {
     principalAmt = Number(document.getElementById("lpAmount").value);
     if (!(principalAmt > 0)) return fail("Enter an amount greater than 0.");
-    if (principalAmt > s.outstanding) return fail(`You only owe ${fmtINR(s.outstanding)}.`);
+    if (principalAmt > s.outstanding) return fail(lend ? `They only owe you ${fmtINR(s.outstanding)}.` : `You only owe ${fmtINR(s.outstanding)}.`);
   } else {
     principalAmt = s.outstanding;
     const el = document.getElementById("lpInterest");
     interestAmt = el ? Math.max(0, Number(el.value) || 0) : 0;
   }
-  const warn = overdrawMessage(account, principalAmt + interestAmt);
-  if (warn && !confirm(warn + " Pay anyway?")) return;
-  if (principalAmt > 0) DB.txns.unshift({ id: uid(), type: "repay", amount: principalAmt, category: "Loan repayment", date, loanId: loan.id, account, note: loan.lender });
-  if (interestAmt > 0) DB.txns.unshift({ id: uid(), type: "expense", amount: interestAmt, category: LOAN_INTEREST_CATEGORY, date, loanId: loan.id, account, note: "Interest \u00b7 " + loan.lender });
+  if (!lend) { // paying money out: warn if the account can't cover it
+    const warn = overdrawMessage(account, principalAmt + interestAmt);
+    if (warn && !confirm(warn + " Pay anyway?")) return;
+  }
+  if (principalAmt > 0) DB.txns.unshift({ id: uid(), type: lend ? "collect" : "repay", amount: principalAmt, category: lend ? "Loan collected" : "Loan repayment", date, loanId: loan.id, account, note: loan.lender });
+  if (interestAmt > 0) DB.txns.unshift({ id: uid(), type: lend ? "income" : "expense", amount: interestAmt, category: lend ? "Interest" : LOAN_INTEREST_CATEGORY, date, loanId: loan.id, account, note: (lend ? "Interest from " : "Interest \u00b7 ") + loan.lender });
   if (p.mode === "close") {
     if (interestAmt < s.interestDue) loan.waived = (loan.waived || 0) + (s.interestDue - interestAmt);
     loan.status = "closed"; loan.closedDate = date;
@@ -1890,7 +1986,7 @@ function undoLoanTxn(id) {
 }
 function deleteLoan(id) {
   const loan = loanById(id); if (!loan) return;
-  if (!confirm(`Delete the loan from ${loan.lender}? Its borrow, repayment and interest entries are removed too, so your balances will change.`)) return;
+  if (!confirm(`Delete the loan ${isLend(loan) ? "to" : "from"} ${loan.lender}? Its entries are removed too, so your balances will change.`)) return;
   DB.goals.loans = DB.goals.loans.filter(l => l.id !== id);
   DB.txns = DB.txns.filter(t => t.loanId !== id);
   if (UI.loanOpenId === id) UI.loanOpenId = null;
@@ -1944,7 +2040,7 @@ function exportBackup() {
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
-const VALID_TYPES = ["income", "expense", "saving", "withdrawal", "transfer", "borrow", "repay"];
+const VALID_TYPES = ["income", "expense", "saving", "withdrawal", "transfer", "borrow", "repay", "lend", "collect"];
 // Returns { ok, message, count }; replaces the current data only when the file looks right
 function restoreFromText(text) {
   let parsed;
@@ -1967,6 +2063,26 @@ function onRestoreFile(input) {
     input.value = ""; render();
   };
   reader.readAsText(f);
+}
+// Like Android's "Clear app data": sign out and wipe everything stored on THIS device (cloud data is untouched)
+async function resetThisDevice() {
+  const unsynced = AUTH.syncState !== "synced" ? "\n\nSome recent changes may not have synced yet and would be lost." : "";
+  if (!confirm("Reset PennyLog on this device?\n\nThis signs you out and clears everything stored here (saved data, offline copy, settings). Your cloud data stays safe and comes back when you sign in again." + unsynced)) return;
+  const safely = async (fn) => { try { await fn(); } catch (e) { /* keep going: reset as much as possible */ } };
+  if (unsubscribeSnap) { unsubscribeSnap(); unsubscribeSnap = null; }
+  await safely(() => window.__fb.signOut(window.__fb.auth));
+  await safely(() => window.__fb.wipeFirestoreCache && window.__fb.wipeFirestoreCache());
+  await safely(() => { localStorage.clear(); sessionStorage.clear(); });
+  await safely(async () => { if (window.caches) { const keys = await caches.keys(); await Promise.all(keys.map(k => caches.delete(k))); } });
+  await safely(async () => { if (navigator.serviceWorker) { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(r => r.unregister())); } });
+  await safely(async () => {
+    if (window.indexedDB && indexedDB.databases) {
+      const dbs = await indexedDB.databases();
+      await Promise.all(dbs.map(d => new Promise(res => { const rq = indexedDB.deleteDatabase(d.name); rq.onsuccess = rq.onerror = rq.onblocked = () => res(); })));
+    }
+  });
+  DB = normalizeDB(emptyDB());
+  location.reload();
 }
 function clearAllData() {
   if (!confirm("Delete ALL your data? Every entry, loan, account, goal and setting is erased on every device. This can't be undone. (Tap Cancel and use Download backup first if you might want it back.)")) return;
