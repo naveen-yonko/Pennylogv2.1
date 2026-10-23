@@ -15,7 +15,7 @@ const LOCKED_CATS = { expense: ["Other", LOAN_INTEREST_CATEGORY], income: ["Sala
 const CATS_INCOME = ["Salary","Freelance","Bonus","Interest","Gift","Other"];
 const TAX_80C_LIMIT = 150000;
 const GITHUB_REPO = "https://github.com/naveen-yonko/Pennylogv2.1";
-const APP_VERSION = "2.6";
+const APP_VERSION = "2.7";
 const CONTACT_EMAIL = "naveen2992005@gmail.com"; // shown on the About page
 
 const TYPE_META = {
@@ -185,7 +185,7 @@ function loadLocalDB() {
 function saveLocalDB() { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 
 let DB = normalizeDB(loadLocalDB());
-let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, loanFormDir: "borrow", loanView: "owe", catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all" };
+let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, loanFormDir: "borrow", loanView: "owe", catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all", histQ: "", histCat: "", histAcct: "", histFrom: "", histTo: "" };
 let AUTH = { user: null, ready: false, mode: "login", error: "", syncState: "offline" };
 
 const OWNER_KEY = "pennylog-owner";
@@ -213,7 +213,7 @@ window.onAuthChange = function (user) {
   if (user && window.__fb) {
     // Never mix accounts: if someone else used this device before, start clean for this account
     const owner = localStorage.getItem(OWNER_KEY);
-    if (owner && owner !== user.uid) { DB = normalizeDB(emptyDB()); saveLocalDB(); }
+    if (owner && owner !== user.uid) { DB = normalizeDB(emptyDB()); saveLocalDB(); clearPinData(); }
     localStorage.setItem(OWNER_KEY, user.uid);
     const { dbFs, doc, onSnapshot } = window.__fb;
     unsubscribeSnap = onSnapshot(doc(dbFs, "pennylog", user.uid), (snap) => {
@@ -396,6 +396,64 @@ function trendChart(months) {
     <line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" stroke="var(--line)" stroke-width="1"/>${bars}
   </svg>`;
 }
+/* ==================== charts ==================== */
+const DONUT_COLORS = ["#A8442D", "#C9A85E", "#1F5C63", "#3D5A8A", "#2F6B45", "#7A5C7E", "#8A5A00", "#6E6A5E"];
+function chartMonthsData(n) {
+  const ledger = buildLedger(), out = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const key = monthKeyOffset(-i), m = ledger.find(x => x.key === key);
+    out.push({ key, income: m ? m.income : 0, spent: m ? m.spent : 0, saved: m ? m.saved : 0 });
+  }
+  return out;
+}
+function groupedBars(data) {
+  const w = 300, h = 110, bw = 7, gap = 3, groupW = bw * 3 + gap * 2, slot = w / data.length;
+  const max = Math.max(1, ...data.flatMap(d => [d.income, d.spent, d.saved]));
+  let bars = "";
+  data.forEach((d, i) => {
+    const x0 = slot * i + (slot - groupW) / 2;
+    [[d.income, "var(--income)", "Income"], [d.spent, "var(--expense)", "Spent"], [d.saved, "var(--saving)", "Saved"]].forEach(([v, c, l], j) => {
+      const bh = v > 0 ? Math.max(2, (v / max) * (h - 8)) : 0;
+      bars += `<rect x="${x0 + j * (bw + gap)}" y="${h - bh}" width="${bw}" height="${bh}" rx="2" fill="${c}"><title>${l}, ${monthLabel(d.key)}: ${fmtINR(v)}</title></rect>`;
+    });
+    bars += `<text x="${slot * i + slot / 2}" y="${h + 13}" text-anchor="middle" font-size="9.5" fill="var(--ink-faint)">${monthLabel(d.key)}</text>`;
+  });
+  return `<svg width="100%" viewBox="0 0 ${w} ${h + 18}" style="display:block"><line x1="0" y1="${h}" x2="${w}" y2="${h}" stroke="var(--line)" stroke-width="1"/>${bars}</svg>`;
+}
+function incomeSpendCard() {
+  const data = chartMonthsData(6);
+  if (data.every(d => !d.income && !d.spent && !d.saved)) return "";
+  const avg = (k) => fmtINR(data.reduce((s, d) => s + d[k], 0) / data.length);
+  const dot = (c, l) => `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--ink-soft)"><span style="width:8px;height:8px;border-radius:2px;background:${c}"></span>${l}</span>`;
+  return `<div class="card">${sectionLabel("Income vs spending \u00b7 last 6 months")}${groupedBars(data)}
+    <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">${dot("var(--income)", "Income")}${dot("var(--expense)", "Spent")}${dot("var(--saving)", "Saved")}</div>
+    <p style="font-size:11.5px;color:var(--ink-soft);margin:8px 0 0">Average a month: income ${avg("income")} \u00b7 spent ${avg("spent")} \u00b7 saved ${avg("saved")}</p>
+  </div>`;
+}
+function categoryBreakdownCard(list, title) {
+  const by = {};
+  list.forEach(t => { by[t.category] = (by[t.category] || 0) + t.amount; });
+  let items = Object.entries(by).sort((a, b) => b[1] - a[1]);
+  if (!items.length) return "";
+  if (items.length > 6) items = items.slice(0, 5).concat([["Others", items.slice(5).reduce((s, [, v]) => s + v, 0)]]);
+  const total = items.reduce((s, [, v]) => s + v, 0);
+  if (!(total > 0)) return "";
+  const r = 40, C = 2 * Math.PI * r;
+  let off = 0, segs = "", legend = "";
+  items.forEach(([c, v], i) => {
+    const len = (v / total) * C, col = DONUT_COLORS[i % DONUT_COLORS.length], pct = Math.round((v / total) * 100);
+    segs += `<circle cx="50" cy="50" r="${r}" fill="none" stroke="${col}" stroke-width="14" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}" transform="rotate(-90 50 50)"><title>${esc(c)}: ${fmtINR(v)}</title></circle>`;
+    off += len;
+    legend += `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 0"><span style="width:9px;height:9px;border-radius:50%;background:${col};flex-shrink:0"></span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-soft)">${esc(c)}</span><span class="num" style="font-weight:700">${fmtINR(v)}</span><span style="width:34px;text-align:right;color:var(--ink-faint);font-size:11.5px">${pct}%</span></div>`;
+  });
+  return `<div class="card">${sectionLabel(title)}
+    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+      <svg viewBox="0 0 100 100" width="124" height="124" style="flex-shrink:0;margin:0 auto">${segs}
+        <text x="50" y="47" text-anchor="middle" font-size="7" fill="var(--ink-faint)">Total</text>
+        <text x="50" y="58" text-anchor="middle" font-size="9" font-weight="700" fill="var(--ink)">${fmtINR(total)}</text></svg>
+      <div style="flex:1;min-width:150px">${legend}</div>
+    </div></div>`;
+}
 function metricCard(label, value, opts) {
   opts = opts || {};
   let deltaHtml = "";
@@ -473,6 +531,7 @@ function viewHome(stats) {
   html += reconcileCard(stats);
 
   html += `<div class="card">${sectionLabel("6-month trend \u00b7 month-end balance")}${trendChart(stats.months)}</div>`;
+  html += incomeSpendCard();
 
   if (topCats.length) {
     html += `<div class="card">${sectionLabel("Top spending this month")}<div style="display:flex;flex-direction:column;gap:11px">`;
@@ -662,6 +721,7 @@ function viewList(type, emptyText) {
     html += `<button class="btn-withdraw" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px" onclick="openWithdraw()">${icon('download',15)} Withdraw from savings to cash</button>`;
   }
   html += scopeChips();
+  if (type === "expense") html += categoryBreakdownCard(list.filter(t => t.type === "expense"), "Where your money went \u00b7 " + (UI.listScope === "all" ? "all time" : "this month"));
   html += `<div class="card">`;
   if (!list.length) html += `<p class="muted">${UI.listScope==="all" ? esc(emptyText) : "Nothing logged this month yet."}</p>`;
   else list.forEach(t => html += txnRow(t, true));
@@ -669,25 +729,54 @@ function viewList(type, emptyText) {
   return html;
 }
 
-// History: month-by-month log, each month ends with the balance brought forward
-function viewHistory() {
-  const ledger = buildLedger();
+// History: month-by-month log with search + filters, each month ends with the balance brought forward
+function histActive() { return !!((UI.histQ || "").trim() || UI.histCat || UI.histAcct || UI.histFrom || UI.histTo); }
+function histAccountsOf(t) {
+  if (t.type === "transfer") return [resolveAcct(t.from), resolveAcct(t.to)];
+  if (t.type === "saving" && t.source === "external") return [];
+  return [resolveAcct(t.account)];
+}
+function histMatch(t) {
   const f = UI.histFilter;
-  const chip = (k, label) => `<button class="chip ${f===k?'on':''}" onclick="setHistFilter('${k}')">${label}</button>`;
-  let html = `<div class="chips">${chip('all','All')}${chip('income','Income')}${chip('expense','Spend')}${chip('saving','Savings')}${chip('transfer','Transfers')}${chip('loan','Loans')}</div>`;
-  const match = (t) => f==="all" || (f==="saving" ? (t.type==="saving"||t.type==="withdrawal") : f==="loan" ? (t.type==="borrow"||t.type==="repay"||t.type==="lend"||t.type==="collect"||!!t.loanId) : t.type===f);
+  const typeOk = f === "all" || (f === "saving" ? (t.type === "saving" || t.type === "withdrawal") : f === "loan" ? (t.type === "borrow" || t.type === "repay" || t.type === "lend" || t.type === "collect" || !!t.loanId) : t.type === f);
+  if (!typeOk) return false;
+  if (UI.histCat && t.category !== UI.histCat) return false;
+  if (UI.histAcct && !histAccountsOf(t).includes(UI.histAcct)) return false;
+  if (UI.histFrom && t.date < UI.histFrom) return false;
+  if (UI.histTo && t.date > UI.histTo) return false;
+  const q = (UI.histQ || "").trim().toLowerCase().replace(/[\u20B9,]/g, "");
+  if (q) {
+    const hay = [titleOf(t), t.category, t.note, String(t.amount)].concat(histAccountsOf(t).map(acctName)).join(" ").toLowerCase();
+    if (!q.split(/\s+/).every(w => hay.includes(w))) return false;
+  }
+  return true;
+}
+function histSummary(rows) {
+  let inn = 0, out = 0, count = 0;
+  rows.forEach(t => { if (t.auto) return; count++; const e = cashEffect(t); if (e > 0) inn += e; else out -= e; });
+  return { count, inn: round2(inn), out: round2(out) };
+}
+function histResultsHtml() {
+  const ledger = buildLedger();
+  const filtering = UI.histFilter !== "all" || histActive();
+  let html = "";
+  if (filtering) {
+    const sum = histSummary(ledger.flatMap(m => m.txns.filter(histMatch)));
+    html += `<div class="card" style="padding:12px 14px"><p style="font-size:12.5px;margin:0;color:var(--ink-soft)"><strong style="color:var(--ink)">${sum.count}</strong> ${sum.count === 1 ? "entry" : "entries"} \u00b7 Money in <span class="num" style="font-weight:700;color:var(--saving)">${fmtINR(sum.inn)}</span> \u00b7 Money out <span class="num" style="font-weight:700;color:var(--expense)">${fmtINR(sum.out)}</span></p></div>`;
+    if (!sum.count) html += `<div class="card"><p class="muted" style="margin:0">No entries match these filters.</p></div>`;
+  }
   ledger.forEach(m => {
-    const rows = m.txns.filter(match);
-    if (f !== "all" && !rows.length) return;
+    const rows = m.txns.filter(histMatch);
+    if (filtering && !rows.length) return;
     html += `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
         <p style="font-size:14px;font-weight:700;margin:0">${esc(monthLong(m.key))}</p>
-        <p style="font-size:11px;color:var(--ink-soft);margin:0">Closing <span class="num" style="font-weight:700;color:${m.closing<0?'var(--danger)':'var(--ink)'}">${fmtINR(m.closing)}</span></p>
+        ${filtering ? `<p style="font-size:11px;color:var(--ink-soft);margin:0">${rows.length} ${rows.length === 1 ? "entry" : "entries"}</p>` : `<p style="font-size:11px;color:var(--ink-soft);margin:0">Closing <span class="num" style="font-weight:700;color:${m.closing<0?'var(--danger)':'var(--ink)'}">${fmtINR(m.closing)}</span></p>`}
       </div>
-      <p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">${m.carry!==0?`${m.prevKey?"Brought fwd":"Opening"} ${fmtINR(m.carry)} \u00b7 `:""}In ${fmtINR(m.income + m.withdrawn + m.borrowed + m.collected)} \u00b7 Out ${fmtINR(m.spent + m.saved + m.repaid + m.lent)}</p>`;
+      ${filtering ? "" : `<p style="font-size:11px;color:var(--ink-faint);margin:0 0 8px">${m.carry!==0?`${m.prevKey?"Brought fwd":"Opening"} ${fmtINR(m.carry)} \u00b7 `:""}In ${fmtINR(m.income + m.withdrawn + m.borrowed + m.collected)} \u00b7 Out ${fmtINR(m.spent + m.saved + m.repaid + m.lent)}</p>`}`;
     if (!rows.length) html += `<p class="muted" style="margin:6px 0">Nothing logged.</p>`;
     rows.forEach(t => html += txnRow(t, true));
-    if (f === "all" && m.carry !== 0) {
+    if (!filtering && m.carry !== 0) {
       const neg = m.carry < 0;
       html += `<div class="row" style="cursor:default;background:var(--brass-tint);margin:6px -8px 0;padding:11px 8px;border-radius:10px;border-bottom:none;width:auto">
         <div style="display:flex;align-items:center;gap:11px;min-width:0;flex:1">
@@ -703,6 +792,74 @@ function viewHistory() {
     html += `</div>`;
   });
   return html;
+}
+function viewHistory() {
+  const f = UI.histFilter;
+  const chip = (k, label) => `<button class="chip ${f===k?'on':''}" onclick="setHistFilter('${k}')">${label}</button>`;
+  const cats = [...new Set(DB.txns.map(t => t.category).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const opt = (v, label, sel) => `<option value="${esc(v)}" ${sel ? "selected" : ""}>${esc(label)}</option>`;
+  let html = `<div class="chips">${chip('all','All')}${chip('income','Income')}${chip('expense','Spend')}${chip('saving','Savings')}${chip('transfer','Transfers')}${chip('loan','Loans')}</div>`;
+  html += `<div class="card" style="padding:12px">
+    <input id="histQ" type="search" placeholder="Search note, category, amount\u2026" value="${esc(UI.histQ)}" oninput="onHistFilter()" style="margin-bottom:8px"/>
+    <div class="flex-gap" style="margin-bottom:8px">
+      <select id="histCat" onchange="onHistFilter()" style="flex:1;min-width:0"><option value="">All categories</option>${cats.map(c => opt(c, c, UI.histCat === c)).join("")}</select>
+      <select id="histAcct" onchange="onHistFilter()" style="flex:1;min-width:0"><option value="">All accounts</option>${DB.goals.accounts.map(a => opt(a.id, a.name, UI.histAcct === a.id)).join("")}</select>
+    </div>
+    <div class="flex-gap">
+      <div style="flex:1;min-width:0"><label class="fl">From</label><input id="histFrom" type="date" value="${esc(UI.histFrom)}" onchange="onHistFilter()"/></div>
+      <div style="flex:1;min-width:0"><label class="fl">To</label><input id="histTo" type="date" value="${esc(UI.histTo)}" onchange="onHistFilter()"/></div>
+    </div>
+    <div class="flex-gap" style="margin-top:10px">
+      <button class="btn-ghost" style="flex:1;padding:9px;font-size:12.5px" onclick="clearHistFilters()">Clear filters</button>
+      <button class="btn-ghost" style="flex:1;padding:9px;font-size:12.5px" onclick="printStatement()">Print / save PDF</button>
+    </div>
+  </div>
+  <div id="histResults">${histResultsHtml()}</div>`;
+  return html;
+}
+function readHistInputs() {
+  const g = (id) => { const el = document.getElementById(id); return el && el.value != null ? el.value : ""; };
+  UI.histQ = g("histQ"); UI.histCat = g("histCat"); UI.histAcct = g("histAcct"); UI.histFrom = g("histFrom"); UI.histTo = g("histTo");
+}
+// typing must not rebuild the whole page (it would drop the keyboard), so only the results are redrawn
+function onHistFilter() { readHistInputs(); const box = document.getElementById("histResults"); if (box) box.innerHTML = histResultsHtml(); }
+function clearHistFilters() { UI.histQ = ""; UI.histCat = ""; UI.histAcct = ""; UI.histFrom = ""; UI.histTo = ""; UI.histFilter = "all"; render(); }
+function fmtDateFull(iso) { return iso.split("-").reverse().join("/"); }
+function histFilterText() {
+  const names = { income: "Income", expense: "Spend", saving: "Savings", transfer: "Transfers", loan: "Loans" };
+  const p = [];
+  if (UI.histFilter !== "all") p.push("Type: " + names[UI.histFilter]);
+  if (UI.histCat) p.push("Category: " + UI.histCat);
+  if (UI.histAcct) p.push("Account: " + acctName(UI.histAcct));
+  if (UI.histFrom || UI.histTo) p.push("Dates: " + (UI.histFrom ? fmtDateFull(UI.histFrom) : "start") + " to " + (UI.histTo ? fmtDateFull(UI.histTo) : "today"));
+  if ((UI.histQ || "").trim()) p.push("Search: " + UI.histQ.trim());
+  return p.length ? p.join(" \u00b7 ") : "All entries";
+}
+// Printable statement of whatever History currently shows (use the browser's Print > Save as PDF)
+function statementHtml() {
+  const rows = buildLedger().flatMap(m => m.txns.filter(histMatch)).filter(t => !t.auto);
+  rows.sort((a, b) => a.date.localeCompare(b.date));
+  const sum = histSummary(rows);
+  let body = "";
+  rows.forEach(t => {
+    const e = cashEffect(t);
+    body += `<tr><td>${fmtDateFull(t.date)}</td><td>${esc(titleOf(t))}${t.note ? `<br/><small>${esc(t.note)}</small>` : ""}</td><td>${esc(histAccountsOf(t).map(acctName).join(" \u2192 ") || "\u2014")}</td><td class="r">${e > 0 ? fmtINR(e) : ""}</td><td class="r">${e < 0 ? fmtINR(-e) : ""}</td><td class="r">${e === 0 ? fmtINR(t.amount) : ""}</td></tr>`;
+  });
+  return `<div class="stmt"><h1>PennyLog statement</h1>
+    <p>${esc(AUTH.user && AUTH.user.email ? AUTH.user.email : "")} \u00b7 generated ${fmtDateFull(todayIso())}</p>
+    <p>${esc(histFilterText())}</p>
+    <table><thead><tr><th>Date</th><th>Details</th><th>Account</th><th class="r">In</th><th class="r">Out</th><th class="r">No cash change</th></tr></thead>
+    <tbody>${body}</tbody>
+    <tfoot><tr><td colspan="3"><strong>${sum.count} ${sum.count === 1 ? "entry" : "entries"}</strong></td><td class="r"><strong>${fmtINR(sum.inn)}</strong></td><td class="r"><strong>${fmtINR(sum.out)}</strong></td><td></td></tr></tfoot></table>
+    <p class="small">"No cash change" covers transfers between your own accounts and savings from outside income. Automatic "Previous balance" rows are not listed.</p></div>`;
+}
+function printStatement() {
+  readHistInputs();
+  const html = statementHtml();
+  if (!histSummary(buildLedger().flatMap(m => m.txns.filter(histMatch))).count) { alert("Nothing to print for these filters."); return; }
+  const area = document.getElementById("printArea");
+  if (area) area.innerHTML = html;
+  if (typeof window.print === "function") window.print();
 }
 
 function savingsBreakdown() {
@@ -912,6 +1069,7 @@ function viewAbout() {
         <span class="chev">${icon('chevron',14)}</span>
       </a>
     </div>
+    ${AUTH.user ? viewSecurityCard() : ""}
     ${AUTH.user ? `<div class="card">
       ${sectionLabel("Account & device","user")}
       <p style="font-size:13px;margin:0 0 12px;word-break:break-all">${esc(AUTH.user.email || "")}</p>
@@ -1425,6 +1583,8 @@ function render() {
     return;
   }
 
+  if (LOCK.mode === "unlock") { document.getElementById("root").innerHTML = viewLockScreen(); return; }
+
   const stats = computeStats();
   const tabs = [
     ["home","home","Home"],
@@ -1502,6 +1662,7 @@ function render() {
     ${UI.showAccounts ? viewAccountsSheet() : ""}
     ${UI.showLoanForm ? viewLoanSheet() : ""}
     ${UI.loanPay ? viewLoanPaySheet() : ""}
+    ${LOCK.mode ? viewLockScreen() : ""}
   `;
   setupSwipeGestures();
 }
@@ -1550,9 +1711,120 @@ function doSignOut() {
   if (unsubscribeSnap) { unsubscribeSnap(); unsubscribeSnap = null; }
   // leave nothing behind on a shared device
   DB = normalizeDB(emptyDB());
-  localStorage.removeItem(STORE_KEY); localStorage.removeItem(OWNER_KEY);
+  localStorage.removeItem(STORE_KEY); localStorage.removeItem(OWNER_KEY); clearPinData();
   UI.tab = "home"; UI.showForm = false; UI.showWithdraw = false; UI.showTransfer = false; UI.showAccounts = false; UI.showLoanForm = false; UI.loanPay = null; UI.mobileMenuOpen = false;
   window.__fb.signOut(window.__fb.auth);
+}
+
+/* ==================== PIN lock (this device only) ==================== */
+const PIN_KEY = "pennylog-pin", AUTOLOCK_KEY = "pennylog-autolock", LOCKOUT_KEY = "pennylog-pin-lockout";
+let LOCK = { mode: null, entry: "", first: "", error: "", fails: 0, until: 0, hiddenAt: 0, busy: false };
+function hasPin() { try { return !!localStorage.getItem(PIN_KEY); } catch (e) { return false; } }
+function autoLockSetting() { try { return localStorage.getItem(AUTOLOCK_KEY) || "1"; } catch (e) { return "1"; } } // minutes away, "0" = always, or "off"
+function loadLockout() { try { const o = JSON.parse(localStorage.getItem(LOCKOUT_KEY)); if (o) { LOCK.fails = o.fails || 0; LOCK.until = o.until || 0; } } catch (e) { /* none saved */ } }
+function saveLockout() { try { if (LOCK.fails) localStorage.setItem(LOCKOUT_KEY, JSON.stringify({ fails: LOCK.fails, until: LOCK.until })); else localStorage.removeItem(LOCKOUT_KEY); } catch (e) { /* ignore */ } }
+if (hasPin()) { LOCK.mode = "unlock"; loadLockout(); }
+async function hashPin(pin, salt) {
+  const data = salt + ":" + pin;
+  if (typeof crypto !== "undefined" && crypto.subtle && typeof TextEncoder !== "undefined") {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+  let h = 5381; for (let i = 0; i < data.length; i++) h = ((h * 33) ^ data.charCodeAt(i)) >>> 0;
+  return "x" + h.toString(16);
+}
+function newSalt() { try { const a = new Uint8Array(8); crypto.getRandomValues(a); return Array.from(a).map(b => b.toString(16).padStart(2, "0")).join(""); } catch (e) { return Math.random().toString(16).slice(2); } }
+async function storePin(pin) { const salt = newSalt(); localStorage.setItem(PIN_KEY, JSON.stringify({ salt, hash: await hashPin(pin, salt) })); }
+async function checkPin(pin) { try { const p = JSON.parse(localStorage.getItem(PIN_KEY)); return !!p && p.hash === await hashPin(pin, p.salt); } catch (e) { return false; } }
+function clearPinData() {
+  try { localStorage.removeItem(PIN_KEY); localStorage.removeItem(AUTOLOCK_KEY); localStorage.removeItem(LOCKOUT_KEY); } catch (e) { /* ignore */ }
+  LOCK.mode = null; LOCK.entry = ""; LOCK.first = ""; LOCK.error = ""; LOCK.fails = 0; LOCK.until = 0;
+}
+const PIN_TITLES = { unlock: "Enter your PIN", set1: "Choose a 4-digit PIN", set2: "Confirm your PIN", verifyChange: "Enter your current PIN", verifyRemove: "Enter your PIN to turn the lock off" };
+function lockSecondsLeft() { return Math.max(0, Math.ceil((LOCK.until - Date.now()) / 1000)); }
+function pinDotsHtml() { return [0, 1, 2, 3].map(i => `<span class="pin-dot ${i < LOCK.entry.length ? "on" : ""}"></span>`).join(""); }
+function viewLockScreen() {
+  const keys = ["1","2","3","4","5","6","7","8","9"].map(k => `<button class="pin-key" onclick="pinPress('${k}')">${k}</button>`).join("")
+    + `<span></span><button class="pin-key" onclick="pinPress('0')">0</button><button class="pin-key" onclick="pinBack()" aria-label="Delete">\u232B</button>`;
+  return `<div class="lock-screen"><div class="lock-inner">
+    <img src="icon-192.png" class="lock-logo" alt="PennyLog"/>
+    <p class="lock-title">${PIN_TITLES[LOCK.mode] || ""}</p>
+    <div id="pinDots" class="pin-dots">${pinDotsHtml()}</div>
+    <p id="pinError" class="pin-error">${esc(LOCK.error)}</p>
+    <div class="pin-pad">${keys}</div>
+    ${LOCK.mode === "unlock" ? `<button class="pin-link" onclick="pinForgot()">Forgot PIN? Sign out</button>` : `<button class="pin-link" onclick="pinCancel()">Cancel</button>`}
+  </div></div>`;
+}
+function refreshPinUi() {
+  const d = document.getElementById("pinDots"); if (d) d.innerHTML = pinDotsHtml();
+  const e = document.getElementById("pinError"); if (e) e.textContent = LOCK.error;
+}
+async function pinPress(k) {
+  if (!LOCK.mode || LOCK.busy || LOCK.entry.length >= 4) return;
+  if (LOCK.mode === "unlock" && lockSecondsLeft() > 0) { LOCK.error = "Too many attempts. Try again in " + lockSecondsLeft() + "s."; refreshPinUi(); return; }
+  LOCK.entry += k; LOCK.error = ""; refreshPinUi();
+  if (LOCK.entry.length === 4) { LOCK.busy = true; try { await pinComplete(); } finally { LOCK.busy = false; } }
+}
+function pinBack() { if (LOCK.busy) return; LOCK.entry = LOCK.entry.slice(0, -1); refreshPinUi(); }
+async function pinComplete() {
+  const pin = LOCK.entry; LOCK.entry = "";
+  if (LOCK.mode === "set1") { LOCK.first = pin; LOCK.mode = "set2"; LOCK.error = ""; return render(); }
+  if (LOCK.mode === "set2") {
+    if (pin !== LOCK.first) { LOCK.mode = "set1"; LOCK.first = ""; LOCK.error = "Those PINs didn't match. Try again."; return render(); }
+    await storePin(pin); LOCK.mode = null; LOCK.first = ""; LOCK.error = ""; LOCK.fails = 0; LOCK.until = 0; saveLockout();
+    return render();
+  }
+  if (!(await checkPin(pin))) {
+    LOCK.fails++;
+    if (LOCK.fails >= 5) { LOCK.until = Date.now() + 30000 * Math.pow(2, Math.min(LOCK.fails - 5, 4)); LOCK.error = "Too many attempts. Try again in " + lockSecondsLeft() + "s."; }
+    else LOCK.error = "Wrong PIN. " + (5 - LOCK.fails) + (5 - LOCK.fails === 1 ? " try" : " tries") + " left.";
+    saveLockout();
+    return render();
+  }
+  LOCK.fails = 0; LOCK.until = 0; LOCK.error = ""; saveLockout();
+  if (LOCK.mode === "unlock") LOCK.mode = null;
+  else if (LOCK.mode === "verifyChange") LOCK.mode = "set1";
+  else if (LOCK.mode === "verifyRemove") { localStorage.removeItem(PIN_KEY); LOCK.mode = null; }
+  render();
+}
+function startSetPin() { LOCK.mode = "set1"; LOCK.entry = ""; LOCK.first = ""; LOCK.error = ""; render(); }
+function changePin() { LOCK.mode = "verifyChange"; LOCK.entry = ""; LOCK.error = ""; render(); }
+function removePin() { LOCK.mode = "verifyRemove"; LOCK.entry = ""; LOCK.error = ""; render(); }
+function lockNow() { if (!hasPin()) return; LOCK.mode = "unlock"; LOCK.entry = ""; LOCK.error = ""; render(); }
+function pinCancel() { LOCK.mode = null; LOCK.entry = ""; LOCK.first = ""; LOCK.error = ""; render(); }
+function pinForgot() {
+  if (!confirm("Forgot your PIN? You will be signed out and the PIN removed from this device. Your cloud data stays safe; sign in again to get it back.")) return;
+  doSignOut();
+}
+function setAutoLock(v) { try { localStorage.setItem(AUTOLOCK_KEY, v); } catch (e) { /* ignore */ } }
+function onVisibilityChange() {
+  if (document.visibilityState === "hidden") { LOCK.hiddenAt = Date.now(); return; }
+  if (!hasPin() || LOCK.mode || !AUTH.user) return;
+  const s = autoLockSetting();
+  if (s === "off" || !LOCK.hiddenAt) return;
+  if (Date.now() - LOCK.hiddenAt >= Number(s) * 60000) { LOCK.mode = "unlock"; LOCK.entry = ""; LOCK.error = ""; render(); }
+}
+document.addEventListener("visibilitychange", onVisibilityChange);
+document.addEventListener("keydown", (e) => {
+  if (!LOCK.mode) return;
+  if (/^[0-9]$/.test(e.key)) pinPress(e.key); else if (e.key === "Backspace") pinBack();
+});
+function viewSecurityCard() {
+  const on = hasPin(), cur = autoLockSetting();
+  const opt = (v, l) => `<option value="${v}" ${cur === v ? "selected" : ""}>${l}</option>`;
+  return `<div class="card">${sectionLabel("App lock", "shield")}
+    <p class="muted" style="margin:0 0 12px">${on ? "PennyLog asks for your 4-digit PIN on this device." : "Ask for a 4-digit PIN whenever PennyLog is opened on this device."}</p>
+    ${on ? `<div class="flex-gap" style="margin-bottom:12px">
+        <button class="btn-ghost" style="flex:1;padding:10px 6px;font-size:12.5px" onclick="lockNow()">Lock now</button>
+        <button class="btn-ghost" style="flex:1;padding:10px 6px;font-size:12.5px" onclick="changePin()">Change PIN</button>
+        <button class="btn-ghost" style="flex:1;padding:10px 6px;font-size:12.5px" onclick="removePin()">Turn off</button>
+      </div>
+      <label class="fl">Lock automatically</label>
+      <select onchange="setAutoLock(this.value)">${opt("0", "Whenever I leave the app")}${opt("1", "After 1 minute away")}${opt("5", "After 5 minutes away")}${opt("15", "After 15 minutes away")}${opt("off", "Only when the app is opened fresh")}</select>`
+      : `<button class="btn-primary" onclick="startSetPin()">Set a PIN</button>`}
+    <p style="font-size:11px;color:var(--ink-faint);margin:8px 0 0">The PIN stays on this device only. It is a privacy lock, not encryption. Forgot it? Sign out and sign in again.</p>
+  </div>`
+
 }
 
 /* ==================== actions ==================== */
@@ -2094,6 +2366,7 @@ function clearAllData() {
 }
 
 /* ==================== init ==================== */
+if (window.addEventListener) window.addEventListener("afterprint", () => { const a = document.getElementById("printArea"); if (a) a.innerHTML = ""; });
 render();
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {

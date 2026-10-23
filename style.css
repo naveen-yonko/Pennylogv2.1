@@ -150,3 +150,34 @@ label.fl { font-size: 11.5px; color: var(--ink-soft); margin: 0 0 5px; display: 
 .btn-google:active { transform: scale(0.98); }
 .auth-divider span { font-size: 11px; color: var(--ink-faint); white-space: nowrap; }
 .auth-divider { margin: 16px 0 14px; }
+
+/* ---------- PIN lock ---------- */
+.lock-screen { position: fixed; inset: 0; z-index: 200; background: var(--ink); color: var(--paper); display: flex; align-items: center; justify-content: center; padding: 20px; overflow-y: auto; }
+.lock-inner { width: 100%; max-width: 300px; text-align: center; }
+.lock-logo { width: 56px; height: 56px; border-radius: 14px; margin-bottom: 18px; }
+.lock-title { font-family: Georgia, serif; font-size: 18px; font-weight: 700; margin: 0 0 18px; }
+.pin-dots { display: flex; justify-content: center; gap: 14px; margin-bottom: 10px; }
+.pin-dot { width: 13px; height: 13px; border-radius: 50%; border: 1.5px solid var(--brass-solid); }
+.pin-dot.on { background: var(--brass-solid); }
+.pin-error { min-height: 18px; font-size: 12.5px; color: #E08A73; margin: 0 0 14px; }
+.pin-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+.pin-key { height: 58px; border-radius: 16px; border: none; background: rgba(251,248,242,0.08); color: var(--paper); font-size: 22px; font-family: inherit; cursor: pointer; }
+.pin-key:active { background: rgba(251,248,242,0.2); transform: scale(0.96); }
+.pin-link { background: none; border: none; color: rgba(251,248,242,0.6); font-size: 13px; cursor: pointer; font-family: inherit; padding: 8px; }
+
+/* ---------- printable statement ---------- */
+#printArea { display: none; }
+.stmt { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #000; }
+.stmt h1 { font-family: Georgia, serif; font-size: 22px; margin: 0 0 6px; }
+.stmt p { font-size: 12px; margin: 0 0 4px; }
+.stmt p.small { font-size: 10.5px; color: #555; margin-top: 12px; }
+.stmt table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 11.5px; }
+.stmt th, .stmt td { border-bottom: 1px solid #ccc; padding: 6px 4px; text-align: left; vertical-align: top; }
+.stmt th { border-bottom: 2px solid #000; }
+.stmt .r { text-align: right; white-space: nowrap; }
+.stmt small { color: #555; }
+@media print {
+  #root, .lock-screen { display: none !important; }
+  #printArea { display: block !important; }
+  html, body { background: #fff !important; padding: 0 !important; }
+}

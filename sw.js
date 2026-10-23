@@ -1,6 +1,6 @@
 // Network-first: you always get the newest app.js / style.css when online,
 // and the cached copy is used only when offline.
-const CACHE = "pennylog-v3";
+const CACHE = "pennylog-v4";
 const ASSETS = ["./", "./index.html", "./style.css", "./app.js", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
