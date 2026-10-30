@@ -3,16 +3,16 @@
 **Read this first.** It replaces re-reading the old conversation. Keep it updated at the end of every piece of work (changelog + any new rule).
 
 ## Where we are right now (handoff summary, update every session)
-- **Shipped: v3.0** (app, tests, this file). Features built in order: Google sign-in fix, rupee logo, History search/filters + printable statement, PIN lock, charts, dark mode, budget alerts, undo-after-delete, editable quick presets, recurring income + editable recurring items.
+- **Shipped: v3.1** (app, tests, this file). Features built in order: Google sign-in fix, rupee logo, History search/filters + printable statement, PIN lock, charts, dark mode, budget alerts, undo-after-delete, editable quick presets, recurring income + editable recurring items, per-person lending view, CSV bank-statement import, year in review. On the last check the user's GitHub repo was still at v2.7 (he had not yet pushed 2.8 to 3.1), so confirm what is actually deployed.
 - **User's workflow:** I deliver changed files; he copies them into his local repo and pushes (Vercel auto-deploys). He sometimes uploads only some files, so compare the clone with what I delivered. He prefers short, direct replies.
-- **Next up (his call):** (1) the 5-minute Firebase security check (restrict API key by referrer, confirm Firestore rules so only the owner reads their doc); (2) per-person lending view; (3) split-a-bill; (4) frequent-entry suggestions; (5) CSV import; (6) year-in-review; (7) `public/` folder restructure. See "To-do" below for detail.
+- **Next up (his call):** (1) the 5-minute Firebase security check (restrict API key by referrer, confirm Firestore rules so only the owner reads their doc); (2) frequent-entry suggestions; (3) split-a-bill; (4) `public/` folder restructure; also `git rm logo-options.png` and commit this file so a plain clone has it. See "To-do" below.
 - **Not verified in a real browser:** the sandbox has no browser, so UI work is covered by `tests.js` only. Ask him to eyeball new screens (both themes) and fix what he reports.
 
 ## Quick start (every session)
 The sandbox resets between turns, so always start by cloning:
 ```
 git clone https://github.com/naveen-yonko/Pennylogv2.1 && cd Pennylogv2.1
-node tests.js        # 434 checks, no install needed; must end with "0 failed"
+node tests.js        # 503 checks, no install needed; must end with "0 failed"
 ```
 Compare the clone with the last files you delivered to confirm the user applied them (he sometimes uploads only some of the files).
 New chat? The user can start one any time: say "clone github.com/naveen-yonko/Pennylogv2.1 and read PROJECT_CONTEXT.md first". If the repo is ever made private, `git clone` will fail and he must upload a zip instead.
@@ -88,6 +88,7 @@ Migration path: keep all storage behind `saveDB / normalizeDB / onAuthChange`, m
 - Don't put secrets or real keys in the repo, chat summaries or this file.
 
 ## Changelog (newest first)
+- **3.1** **People view** (Loans > "People" chip): `loanPeople()` groups loans by `personKey(lender)` (case/space-insensitive), shows owed-to-you / you-owe totals, a net status per person, and expands (`UI.personOpen`) to that person's open loan cards and closed loans. **CSV bank-statement import** (Goals > "Import bank statement (CSV)"): `parseCsv` (quotes, BOM, `, ; tab |`), header-row and column guessing, three amount modes (one signed column / debit+credit / amount+type, incl. PennyLog's own export), date formats d/m/y or m/d/y, optional keyword category guessing (`CSV_KEYWORDS`), choice of account, preview with per-row tick boxes, one-to-one duplicate detection (same date + type + amount as an existing entry; ticked off by default), 3 MB file cap and a guard against the ~1 MiB Firestore document limit, whole import is one Undo. Only income/expense rows import; transfers and loan rows are skipped with a reason. State lives in the global `CSV`, the sheet in `viewCsvSheet()`. **Year in review** (History > "Year in review", `UI.tab = "review"`, not in the nav): totals, savings rate, 12-month bars, best / toughest / highest-spend month, average spend, biggest income, category donut, top 5 expenses, year chips. `groupedBars` bar width now adapts to the number of months.
 - **3.0** **Quick presets are editable** (pencil button on each preset opens the same form pre-filled, "Save changes" updates in place; `UI.editingPresetId`). **Recurring income**: the recurring form has an Income tab ("Goes into" account), it shows in Due this month and logs as income; pending income is not counted as a bill in safe-to-spend. **Recurring items are editable** too (`UI.editingRecId`; changing the type drops fields the new type does not use; `lastLoggedMonth` is kept). New `edit` (pencil) icon.
 - **2.9** **Undo after delete**: entries, transfers, loan entries, recurring items and goals are deleted without a confirm prompt and show an "Undo" toast for 8 s (`takeSnap()` before the change, `showToast(msg, snap)` after `saveDB()`, `doUndo()` restores the snapshot). Accounts, categories and loans keep their confirm prompt and also get Undo. The Undo is retired by any later save and by a remote change from another device (otherwise it would overwrite it). **Budget alerts**: Home "Budget alerts" card for categories at 80%+ of their monthly budget (amber, red when over) and a toast when an expense you save crosses 80% / 100%. Toast lives in `#toast` (index.html), outside `#root`.
 - **2.8** **Dark mode** (About > Appearance: Auto / Light / Dark, per device in `localStorage["pennylog-theme"]`; `:root[data-theme="dark"]` in `style.css` overrides every colour variable; an inline script in `index.html` sets `data-theme` before first paint so there is no flash). Rule from now on: **never hard-code colours in CSS or app.js, use the variables** (`--ink`, `--card`, `--line`, `--track`, `--tint-neutral`, ...). Surfaces that stay dark in both themes (cover, login brand panel, lock screen) use `--cover-bg` / `--on-dark`, not `--ink` / `--paper`. `tests.js` fails if the dark block misses a variable.
@@ -101,6 +102,7 @@ Migration path: keep all storage behind `saveDB / normalizeDB / onAuthChange`, m
 - Earlier: password-eye fix, mobile drawer, sidebar, Firebase env-var setup, withdraw from savings, "outside income" savings, recurring bills, 80C tracker, CSV export, About page, redesigned login.
 
 ## Known limitations / gotchas
+- CSV import assumes bank-style CSV (not Excel/PDF). Amounts use `.` as the decimal point. Duplicate detection ignores the description on purpose (manual entries rarely match bank text).
 - PIN lock is per device and casual: someone with browser dev tools on an unlocked device can bypass it. "Forgot PIN" = sign out (PIN is removed), cloud data is untouched.
 - Printable statement relies on the browser's Print dialog (choose "Save as PDF"); it lists real entries only, not the automatic "Previous balance" rows.
 - Two deficit months in a row: the older shortfall shows in both months' "Spent" (cash figures stay correct).
@@ -111,13 +113,12 @@ Migration path: keep all storage behind `saveDB / normalizeDB / onAuthChange`, m
 - Two devices editing at the same time: last save wins for the whole doc.
 
 ## To-do list (keep current)
-**Done:** editable presets; recurring income + editing; dark mode; search + filters + printable statement; PIN lock; income-vs-spend and category charts; accounts + transfers; presets; custom categories; goals; previous-balance expense; loans with interest + close suggestions; lending (owed to me); Google sign-in; overdraft guards; History; backup/restore/clear data; Reset this device; About fixes; project context + tests.
+**Done:** per-person lending view; CSV import; year in review; editable presets; recurring income + editing; dark mode; search + filters + printable statement; PIN lock; income-vs-spend and category charts; accounts + transfers; presets; custom categories; goals; previous-balance expense; loans with interest + close suggestions; lending (owed to me); Google sign-in; overdraft guards; History; backup/restore/clear data; Reset this device; About fixes; project context + tests.
 **Do next (user action in consoles, 5 min):** turn on the **Google** provider in Firebase → Authentication → Sign-in method (needs a support email); restrict the Firebase web API key by referrer; confirm Firestore rules; add `pennylogv21.vercel.app` to Auth authorized domains (done earlier).
 **Open, by priority:**
 1. Optional `public/` folder restructure so docs/tests are not served (see Security model).
-2. (done: search/filters/statement, PIN lock, charts, dark mode, budget alerts, undo)
+2. (done: search/filters/statement, PIN lock, charts, dark mode, budget alerts, undo, per-person lending, CSV import, year in review)
 4. Interest reminders / due-date nudges on loans (needs a server or push; see Architecture decision).
-5. Per-person view for lending (all loans to one borrower).
 6. Split Firestore data into per-month docs (needed only when near 1 MiB, or before adding a backend).
 7. Backend only if a trigger in "Architecture decision" appears (reminders, AI, scheduled jobs).
-8. Split-a-bill; frequent-entry suggestions; CSV import; year-in-review.
+8. Split-a-bill; frequent-entry suggestions.

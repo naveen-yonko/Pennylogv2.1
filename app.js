@@ -15,7 +15,7 @@ const LOCKED_CATS = { expense: ["Other", LOAN_INTEREST_CATEGORY], income: ["Sala
 const CATS_INCOME = ["Salary","Freelance","Bonus","Interest","Gift","Other"];
 const TAX_80C_LIMIT = 150000;
 const GITHUB_REPO = "https://github.com/naveen-yonko/Pennylogv2.1";
-const APP_VERSION = "3.0";
+const APP_VERSION = "3.1";
 const CONTACT_EMAIL = "naveen2992005@gmail.com"; // shown on the About page
 
 const TYPE_META = {
@@ -186,7 +186,7 @@ function loadLocalDB() {
 function saveLocalDB() { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 
 let DB = normalizeDB(loadLocalDB());
-let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, editingPresetId: null, editingRecId: null, showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, loanFormDir: "borrow", loanView: "owe", catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all", histQ: "", histCat: "", histAcct: "", histFrom: "", histTo: "" };
+let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, editingPresetId: null, editingRecId: null, personOpen: null, reviewYear: "", showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, loanFormDir: "borrow", loanView: "owe", catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all", histQ: "", histCat: "", histAcct: "", histFrom: "", histTo: "" };
 let AUTH = { user: null, ready: false, mode: "login", error: "", syncState: "offline" };
 
 const OWNER_KEY = "pennylog-owner";
@@ -412,7 +412,7 @@ function chartMonthsData(n) {
   return out;
 }
 function groupedBars(data) {
-  const w = 300, h = 110, bw = 7, gap = 3, groupW = bw * 3 + gap * 2, slot = w / data.length;
+  const w = 300, h = 110, gap = 3, slot = w / data.length, bw = Math.max(3, Math.min(7, (slot - 4 - gap * 2) / 3)), groupW = bw * 3 + gap * 2;
   const max = Math.max(1, ...data.flatMap(d => [d.income, d.spent, d.saved]));
   let bars = "";
   data.forEach((d, i) => {
@@ -804,7 +804,8 @@ function viewHistory() {
   const chip = (k, label) => `<button class="chip ${f===k?'on':''}" onclick="setHistFilter('${k}')">${label}</button>`;
   const cats = [...new Set(DB.txns.map(t => t.category).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const opt = (v, label, sel) => `<option value="${esc(v)}" ${sel ? "selected" : ""}>${esc(label)}</option>`;
-  let html = `<div class="chips">${chip('all','All')}${chip('income','Income')}${chip('expense','Spend')}${chip('saving','Savings')}${chip('transfer','Transfers')}${chip('loan','Loans')}</div>`;
+  let html = `<button class="btn-ghost" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-bottom:12px" onclick="openReview()">${icon('history',15)} Year in review</button>`;
+  html += `<div class="chips">${chip('all','All')}${chip('income','Income')}${chip('expense','Spend')}${chip('saving','Savings')}${chip('transfer','Transfers')}${chip('loan','Loans')}</div>`;
   html += `<div class="card" style="padding:12px">
     <input id="histQ" type="search" placeholder="Search note, category, amount\u2026" value="${esc(UI.histQ)}" oninput="onHistFilter()" style="margin-bottom:8px"/>
     <div class="flex-gap" style="margin-bottom:8px">
@@ -930,6 +931,7 @@ function viewGoals(stats) {
   html += viewPresetsCard();
 
   html += `<button class="btn-ghost" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-bottom:14px" onclick="exportCsv()">${icon('download',15)} Export all data (CSV)</button>`;
+  html += `<button class="btn-ghost" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-bottom:14px" onclick="document.getElementById('csvFile').click()">${icon('download',15)} Import bank statement (CSV)</button><input id="csvFile" type="file" accept=".csv,text/csv,text/plain" style="display:none" onchange="onCsvFile(this.files[0]); this.value=''"/>`;
 
   html += viewDataCard();
   html += viewAccountCard();
@@ -1105,6 +1107,60 @@ function viewAbout() {
     </div>`;
 }
 
+/* ==================== people (all loans with one person) ==================== */
+function personKey(name) { return String(name || "").trim().toLowerCase(); }
+function loanPeople() {
+  const by = {};
+  (DB.goals.loans || []).forEach(l => {
+    const k = personKey(l.lender) || "(no name)";
+    (by[k] = by[k] || { key: k, name: String(l.lender || "").trim() || "No name", loans: [] }).loans.push(l);
+  });
+  return Object.values(by).map(p => {
+    let lent = 0, borrowed = 0, lentInt = 0, borInt = 0, openCount = 0;
+    p.loans.forEach(l => {
+      if (l.status === "closed") return;
+      const s = loanStats(l); openCount++;
+      if (isLend(l)) { lent += s.outstanding; lentInt += s.interestDue; } else { borrowed += s.outstanding; borInt += s.interestDue; }
+    });
+    const owedToYou = lent + lentInt, youOwe = borrowed + borInt;
+    return { ...p, lent, borrowed, lentInt, borInt, owedToYou, youOwe, net: owedToYou - youOwe, openCount, closedCount: p.loans.length - openCount };
+  }).sort((a, b) => ((b.openCount > 0) - (a.openCount > 0)) || (Math.abs(b.net) - Math.abs(a.net)) || a.name.localeCompare(b.name));
+}
+function togglePerson(enc) { const k = decodeURIComponent(enc); UI.personOpen = UI.personOpen === k ? null : k; render(); }
+function viewPeople() {
+  const people = loanPeople();
+  if (!people.length) return `<div class="card"><p class="muted" style="margin:0">Add a loan (money you borrowed or lent) and each person shows up here, with everything between the two of you in one place.</p></div>`;
+  const toYou = people.reduce((a, p) => a + p.owedToYou, 0), youOwe = people.reduce((a, p) => a + p.youOwe, 0);
+  let html = `<div class="card">${sectionLabel("Across all people", "rupee")}
+    <div style="display:flex;gap:12px">
+      <div style="flex:1"><p style="font-size:11.5px;color:var(--ink-soft);margin:0">Owed to you</p><p class="num" style="font-size:20px;font-weight:700;margin:2px 0 0;color:var(--saving)">${fmtINR(toYou)}</p></div>
+      <div style="flex:1"><p style="font-size:11.5px;color:var(--ink-soft);margin:0">You owe</p><p class="num" style="font-size:20px;font-weight:700;margin:2px 0 0;color:var(--danger)">${fmtINR(youOwe)}</p></div>
+    </div></div>`;
+  people.forEach(p => {
+    const open = UI.personOpen === p.key;
+    const status = p.openCount === 0 ? { t: "All settled", c: "var(--ink-faint)" } : p.net > 0 ? { t: "Owes you " + fmtINR(p.net), c: "var(--saving)" } : p.net < 0 ? { t: "You owe " + fmtINR(-p.net), c: "var(--danger)" } : { t: "Even", c: "var(--ink-soft)" };
+    html += `<div class="card" style="padding:14px 16px">
+      <button onclick="togglePerson('${encodeURIComponent(p.key).replace(/'/g, "%27")}')" style="all:unset;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%">
+        <span style="min-width:0"><span style="display:block;font-size:14px;font-weight:700">${esc(p.name)}</span><span style="display:block;font-size:11.5px;color:var(--ink-soft)">${p.openCount} open \u00b7 ${p.closedCount} settled</span></span>
+        <span class="num" style="font-size:13.5px;font-weight:700;color:${status.c};flex-shrink:0">${status.t}</span>
+      </button>`;
+    if (open) {
+      const line = (l, v, c) => `<div style="display:flex;justify-content:space-between;font-size:12.5px;padding:3px 0"><span style="color:var(--ink-soft)">${l}</span><span class="num" style="font-weight:600;color:${c || "var(--ink)"}">${v}</span></div>`;
+      html += `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
+        ${p.lent || p.lentInt ? line("You lent (still out)", fmtINR(p.lent)) + (p.lentInt ? line("Interest due to you", fmtINR(p.lentInt), "var(--brass)") : "") : ""}
+        ${p.borrowed || p.borInt ? line("You borrowed (still owed)", fmtINR(p.borrowed)) + (p.borInt ? line("Interest you owe", fmtINR(p.borInt), "var(--danger)") : "") : ""}
+        ${p.openCount === 0 ? `<p class="muted" style="margin:4px 0 0">Nothing outstanding.</p>` : ""}
+      </div>`;
+    }
+    html += `</div>`;
+    if (open) {
+      p.loans.filter(l => l.status !== "closed").forEach(l => { html += loanCard(l, loanStats(l)); });
+      html += closedLoansHtml(p.loans.filter(l => l.status === "closed").map(l => ({ l, s: loanStats(l) })));
+    }
+  });
+  return html;
+}
+
 /* ==================== loans (money you borrowed or lent) ==================== */
 // Each loan has `dir`: "borrow" (you owe; the default for older loans) or "lend" (owed to you).
 // `lender` holds the other person's name in both cases.
@@ -1207,9 +1263,10 @@ function homeLoansCard(stats) {
 }
 
 function viewLoans(stats) {
-  const view = UI.loanView === "owed" ? "owed" : "owe";
+  const view = UI.loanView === "owed" ? "owed" : UI.loanView === "people" ? "people" : "owe";
   const chip = (k, label) => `<button class="chip ${view === k ? "on" : ""}" onclick="setLoanView('${k}')">${label}</button>`;
-  let html = `<div class="chips">${chip("owe", "I owe")}${chip("owed", "Owed to me")}</div>`;
+  let html = `<div class="chips">${chip("owe", "I owe")}${chip("owed", "Owed to me")}${chip("people", "People")}</div>`;
+  if (view === "people") return html + viewPeople();
   html += `<button class="btn-primary" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--loan)" onclick="openLoanForm('${view === "owed" ? "lend" : "borrow"}')">${icon("plus",15)} ${view === "owed" ? "Lend money" : "Add a loan"}</button>`;
   const debts = openLoans(), lends = openLends();
   if (debts.length && lends.length) {
@@ -1617,6 +1674,7 @@ function render() {
   else if (UI.tab==="loans") body = viewLoans(stats);
   else if (UI.tab==="history") body = viewHistory();
   else if (UI.tab==="goals") body = viewGoals(stats);
+  else if (UI.tab==="review") body = viewReview();
   else if (UI.tab==="about") body = viewAbout();
 
   const navHtml = tabs.filter(t => t[0] !== "about").map(([k,ic,label]) => `<button class="navitem ${UI.tab===k?'active':''}" onclick="setTab('${k}')">${icon(ic,17)}<span>${label}</span><span class="dot"></span></button>`).join("");
@@ -1675,6 +1733,7 @@ function render() {
     ${UI.showAccounts ? viewAccountsSheet() : ""}
     ${UI.showLoanForm ? viewLoanSheet() : ""}
     ${UI.loanPay ? viewLoanPaySheet() : ""}
+    ${CSV ? viewCsvSheet() : ""}
     ${LOCK.mode ? viewLockScreen() : ""}
   `;
   setupSwipeGestures();
@@ -1724,9 +1783,276 @@ function doSignOut() {
   if (unsubscribeSnap) { unsubscribeSnap(); unsubscribeSnap = null; }
   // leave nothing behind on a shared device
   DB = normalizeDB(emptyDB());
-  localStorage.removeItem(STORE_KEY); localStorage.removeItem(OWNER_KEY); clearPinData(); hideToast();
+  localStorage.removeItem(STORE_KEY); localStorage.removeItem(OWNER_KEY); clearPinData(); hideToast(); CSV = null;
   UI.tab = "home"; UI.showForm = false; UI.showWithdraw = false; UI.showTransfer = false; UI.showAccounts = false; UI.showLoanForm = false; UI.loanPay = null; UI.mobileMenuOpen = false;
   window.__fb.signOut(window.__fb.auth);
+}
+
+/* ==================== year in review ==================== */
+function reviewYears() {
+  const ys = new Set(DB.txns.filter(t => !t.auto && t.date).map(t => t.date.slice(0, 4)));
+  ys.add(todayIso().slice(0, 4));
+  return [...ys].sort();
+}
+function reviewData(year) {
+  const rows = DB.txns.filter(t => !t.auto && t.date && t.date.slice(0, 4) === year);
+  const months = [];
+  for (let m = 1; m <= 12; m++) months.push({ key: year + "-" + String(m).padStart(2, "0"), income: 0, spent: 0, saved: 0, count: 0 });
+  let income = 0, spent = 0, saved = 0, savedCash = 0, withdrawn = 0;
+  rows.forEach(t => {
+    const m = months[Number(t.date.slice(5, 7)) - 1]; if (!m) return;
+    m.count++;
+    if (t.type === "income") { income += t.amount; m.income += t.amount; }
+    else if (t.type === "expense") { spent += t.amount; m.spent += t.amount; }
+    else if (t.type === "saving") { saved += t.amount; m.saved += t.amount; if (t.source !== "external") savedCash += t.amount; }
+    else if (t.type === "withdrawal") withdrawn += t.amount;
+  });
+  months.forEach(m => { m.net = round2(m.income - m.spent); });
+  const active = months.filter(m => m.income > 0 || m.spent > 0);
+  const best = active.length ? active.reduce((a, b) => (b.net > a.net ? b : a)) : null;
+  const worst = active.length ? active.reduce((a, b) => (b.net < a.net ? b : a)) : null;
+  const priciest = active.length ? active.reduce((a, b) => (b.spent > a.spent ? b : a)) : null;
+  const expenses = rows.filter(t => t.type === "expense");
+  return {
+    year, rows, months, income: round2(income), spent: round2(spent), saved: round2(saved), savedCash: round2(savedCash), withdrawn: round2(withdrawn),
+    savingsRate: income > 0 ? Math.round((savedCash / income) * 100) : null,
+    best, worst, priciest, activeMonths: active.length,
+    avgSpend: active.length ? round2(spent / active.length) : 0,
+    topExpenses: expenses.slice().sort((a, b) => b.amount - a.amount).slice(0, 5),
+    biggestIncome: rows.filter(t => t.type === "income").reduce((a, b) => (!a || b.amount > a.amount ? b : a), null),
+    expenses,
+  };
+}
+function openReview() { setTab("review"); }
+function setReviewYear(y) { UI.reviewYear = y; render(); }
+function viewReview() {
+  const years = reviewYears();
+  const year = years.includes(UI.reviewYear) ? UI.reviewYear : todayIso().slice(0, 4);
+  const d = reviewData(year);
+  let html = `<button class="btn-ghost" style="padding:7px 12px;font-size:12.5px;margin-bottom:12px" onclick="setTab('history')">\u2190 Back to History</button>`;
+  if (years.length > 1) html += `<div class="chips">${years.map(y => `<button class="chip ${y === year ? "on" : ""}" onclick="setReviewYear('${y}')">${y}</button>`).join("")}</div>`;
+  if (!d.rows.length) return html + `<div class="card"><p class="muted" style="margin:0">Nothing logged in ${year} yet. Once you add entries, your year in review shows up here.</p></div>`;
+  html += `<div class="cover" style="margin-bottom:14px"><p style="font-size:12px;opacity:.7;margin:0">${year} in review</p>
+    <p class="num" style="font-size:26px;font-weight:700;margin:4px 0 2px">${fmtINR(d.income - d.spent)} <span style="font-size:13px;font-weight:400;opacity:.7">left after spending</span></p>
+    <p style="font-size:12px;opacity:.7;margin:0">${d.rows.length} entries across ${d.activeMonths} active month${d.activeMonths === 1 ? "" : "s"}</p></div>`;
+  html += `<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:14px">
+    ${metricCard("Income", d.income)}${metricCard("Spent", d.spent)}
+    ${metricCard("Saved", d.saved, { note: d.withdrawn > 0 ? fmtINR(d.withdrawn) + " withdrawn" : "" })}
+    ${metricCard("Savings rate", d.savingsRate === null ? "\u2014" : d.savingsRate + "%", { note: "of income saved from cash" })}</div>`;
+  const dot = (c, l) => `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--ink-soft)"><span style="width:8px;height:8px;border-radius:2px;background:${c}"></span>${l}</span>`;
+  html += `<div class="card">${sectionLabel("Month by month")}${groupedBars(d.months)}
+    <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">${dot("var(--income)", "Income")}${dot("var(--expense)", "Spent")}${dot("var(--saving)", "Saved")}</div></div>`;
+  const hl = (label, value, sub) => `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)"><span style="font-size:13px;color:var(--ink-soft)">${label}</span><span style="text-align:right"><span class="num" style="font-size:13.5px;font-weight:700">${value}</span>${sub ? `<span style="display:block;font-size:11px;color:var(--ink-faint)">${sub}</span>` : ""}</span></div>`;
+  let h = "";
+  if (d.best) h += hl("Best month", monthLong(d.best.key), (d.best.net >= 0 ? fmtINR(d.best.net) + " left over" : fmtINR(-d.best.net) + " overspent"));
+  if (d.worst && d.worst !== d.best) h += hl("Toughest month", monthLong(d.worst.key), (d.worst.net >= 0 ? fmtINR(d.worst.net) + " left over" : fmtINR(-d.worst.net) + " overspent"));
+  if (d.priciest) h += hl("Highest spending", monthLong(d.priciest.key), fmtINR(d.priciest.spent) + " spent");
+  h += hl("Average spend a month", fmtINR(d.avgSpend), "over " + d.activeMonths + " active month" + (d.activeMonths === 1 ? "" : "s"));
+  if (d.biggestIncome) h += hl("Biggest income", fmtINR(d.biggestIncome.amount), esc(d.biggestIncome.category) + " \u00b7 " + fmtDateFull(d.biggestIncome.date));
+  html += `<div class="card">${sectionLabel("Highlights")}${h}</div>`;
+  html += categoryBreakdownCard(d.expenses, "Where your money went \u00b7 " + year);
+  if (d.topExpenses.length) {
+    html += `<div class="card">${sectionLabel("Biggest expenses")}${d.topExpenses.map(t => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)"><span style="min-width:0"><span style="display:block;font-size:13px">${esc(t.note || t.category)}</span><span style="display:block;font-size:11px;color:var(--ink-faint)">${esc(t.category)} \u00b7 ${fmtDateFull(t.date)}</span></span><span class="num" style="font-weight:700;font-size:13.5px;color:var(--expense);flex-shrink:0">${fmtINR(t.amount)}</span></div>`).join("")}</div>`;
+  }
+  return html;
+}
+
+/* ==================== CSV import (bank statements) ==================== */
+let CSV = null;
+const CSV_KEYWORDS = [
+  ["Food", /swiggy|zomato|restaurant|cafe|coffee|dominos|domino|pizza|mcdonald|kfc|burger|bakery|biryani|bigbasket|blinkit|zepto|grocer|supermarket|dmart|mess|canteen|hotel/i],
+  ["Transport", /uber|\bola\b|rapido|irctc|redbus|metro|petrol|diesel|fuel|bpcl|hpcl|indian oil|fastag|parking|bus|cab\b/i],
+  ["Utilities", /electric|bescom|tneb|water bill|\bjio\b|airtel|vodafone|\bvi\b|recharge|broadband|wifi|\bgas\b|dth|postpaid|prepaid/i],
+  ["Shopping", /amazon|flipkart|myntra|ajio|meesho|nykaa|decathlon|croma|reliance (digital|trends)|lifestyle/i],
+  ["Entertainment", /netflix|spotify|hotstar|prime video|bookmyshow|youtube|inox|pvr|gaming|steam|epic games/i],
+  ["Health", /pharma|apollo|medplus|hospital|clinic|diagnostic|lab\b|doctor|dental|gym|cult\.?fit/i],
+  ["Rent", /\brent\b|landlord/i],
+];
+function parseCsv(text) {
+  text = String(text || "").replace(/^\uFEFF/, "");
+  const lines = text.split(/\r?\n/).filter(l => l.trim()).slice(0, 10);
+  const delim = [",", ";", "\t", "|"].map(d => [d, lines.reduce((n, l) => n + (l.split(d).length - 1), 0)]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = []; let row = [], cur = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+    else if (c === '"') q = true;
+    else if (c === delim) { row.push(cur); cur = ""; }
+    else if (c === "\n" || c === "\r") { if (c === "\r" && text[i + 1] === "\n") i++; row.push(cur); cur = ""; if (row.some(x => x.trim() !== "")) rows.push(row); row = []; }
+    else cur += c;
+  }
+  row.push(cur); if (row.some(x => x.trim() !== "")) rows.push(row);
+  return rows.map(r => r.map(x => x.trim()));
+}
+function guessHeaderRow(rows) {
+  for (let i = 0; i < Math.min(rows.length, 30); i++) {
+    const r = rows[i];
+    if (r.filter(x => x).length >= 3 && r.some(x => /date/i.test(x)) && r.some(x => /amount|debit|credit|withdraw|deposit|balance|narration|description|particulars|type|category/i.test(x))) return i;
+  }
+  return 0;
+}
+function guessCsvMap(headers) {
+  const find = (re) => headers.findIndex(h => re.test(h));
+  const map = { date: -1, desc: -1, amount: -1, debit: -1, credit: -1, category: -1, type: -1 };
+  map.date = headers.findIndex(h => /date/i.test(h) && !/value/i.test(h)); if (map.date < 0) map.date = find(/date/i);
+  map.desc = find(/narration|description|particulars|details|remarks|note|memo|payee/i);
+  map.debit = find(/debit|withdraw|\bdr\b|paid out|money out/i);
+  map.credit = find(/credit|deposit|\bcr\b|paid in|money in/i);
+  map.amount = find(/^(txn |transaction )?amount/i);
+  map.category = find(/category/i);
+  map.type = find(/^(txn |transaction )?type$/i);
+  const mode = (map.debit >= 0 && map.credit >= 0) ? "split" : (map.type >= 0 && map.amount >= 0) ? "typed" : "single";
+  return { map, mode };
+}
+function parseCsvDate(s, fmt) {
+  s = String(s || "").trim(); if (!s) return null;
+  let y, m, d, mm;
+  if ((mm = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/))) { y = +mm[1]; m = +mm[2]; d = +mm[3]; }
+  else if ((mm = s.match(/^(\d{1,2})[-\/. ]([A-Za-z]{3,9})[-\/. ,]+(\d{2,4})/))) {
+    m = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"].indexOf(mm[2].slice(0, 3).toLowerCase()) + 1; d = +mm[1]; y = +mm[3];
+  }
+  else if ((mm = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/))) {
+    if (fmt === "mdy") { m = +mm[1]; d = +mm[2]; } else { d = +mm[1]; m = +mm[2]; }
+    y = +mm[3];
+  }
+  else return null;
+  if (y < 100) y += 2000;
+  if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;
+  const dt = new Date(y, m - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
+  return y + "-" + String(m).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+}
+// "1,200.50", "(500)", "-500", "\u20B9 2,000 Dr", "1500 CR" -> signed number (Dr = out, Cr = in); null if there is no number
+function parseCsvAmount(s) {
+  let t = String(s == null ? "" : s).trim(); if (!t) return null;
+  let neg = /^\(.*\)$/.test(t) || /^[-\u2212]/.test(t) || /\bdr\.?$/i.test(t);
+  t = t.replace(/[^0-9.]/g, "");
+  if (!t || t === ".") return null;
+  const n = Number(t); if (!isFinite(n)) return null;
+  return neg ? -n : n;
+}
+function csvGuessCategory(type, desc) {
+  const cats = catsFor(type);
+  if (type === "income") return /salary|stipend|payroll/i.test(desc) && cats.includes("Salary") ? "Salary" : "Other";
+  for (const [cat, re] of CSV_KEYWORDS) if (cats.includes(cat) && re.test(desc)) return cat;
+  return "Other";
+}
+function csvCandidates() {
+  const c = CSV, out = [], pool = {};
+  DB.txns.forEach(t => { if (t.auto) return; const k = t.date + "|" + t.type + "|" + round2(t.amount); (pool[k] = pool[k] || []).push(t); });
+  c.rows.slice(c.headerRow + 1).forEach((r, i) => {
+    const get = (k) => (c.map[k] >= 0 && c.map[k] < r.length ? r[c.map[k]] : "");
+    const cd = { idx: i, raw: r, date: parseCsvDate(get("date"), c.dateFmt), type: null, amount: 0, note: get("desc"), category: "Other", skip: "", duplicate: false };
+    if (c.mode === "split") {
+      const dv = parseCsvAmount(get("debit")), cv = parseCsvAmount(get("credit"));
+      if (dv && Math.abs(dv) > 0) { cd.type = "expense"; cd.amount = Math.abs(dv); }
+      else if (cv && Math.abs(cv) > 0) { cd.type = "income"; cd.amount = Math.abs(cv); }
+    } else if (c.mode === "typed") {
+      const a = parseCsvAmount(get("amount")), tv = String(get("type")).trim().toLowerCase();
+      if (a) { cd.amount = Math.abs(a); if (tv === "income" || tv === "expense") cd.type = tv; else cd.skip = "Type \u201c" + tv + "\u201d isn\u2019t imported"; }
+    } else {
+      let a = parseCsvAmount(get("amount"));
+      if (a) { if (c.invert) a = -a; cd.type = a < 0 ? "expense" : "income"; cd.amount = Math.abs(a); }
+    }
+    cd.amount = round2(cd.amount);
+    if (!cd.skip) {
+      if (!cd.date) cd.skip = "Couldn\u2019t read the date";
+      else if (!cd.type || !(cd.amount > 0)) cd.skip = "No amount";
+    }
+    if (!cd.skip) {
+      const given = get("category").trim().toLowerCase();
+      const match = given ? catsFor(cd.type).find(x => x.toLowerCase() === given) : null;
+      cd.category = match || (c.autoCat ? csvGuessCategory(cd.type, cd.note) : "Other");
+      const k = cd.date + "|" + cd.type + "|" + cd.amount;
+      if (pool[k] && pool[k].length) { pool[k].pop(); cd.duplicate = true; } // each existing entry can match only one row
+    }
+    cd.include = cd.skip ? false : (c.override[i] !== undefined ? c.override[i] : !cd.duplicate);
+    out.push(cd);
+  });
+  return out;
+}
+function csvStart(name, text) {
+  const rows = parseCsv(text);
+  if (rows.length < 2) { alert("Couldn't find any rows in that file. Is it a CSV export from your bank?"); return; }
+  const headerRow = guessHeaderRow(rows), g = guessCsvMap(rows[headerRow]);
+  CSV = { name, rows, headerRow, map: g.map, mode: g.mode, dateFmt: "dmy", invert: false, autoCat: true, account: DB.goals.defaultAccount, override: {}, error: "" };
+  render();
+}
+function onCsvFile(file) {
+  if (!file) return;
+  if (file.size > 3 * 1024 * 1024) { alert("That file is too big (over 3 MB). Export a shorter date range from your bank."); return; }
+  file.text().then(text => csvStart(file.name, text)).catch(() => alert("Couldn't read that file."));
+}
+function csvRender() {
+  const el = document.getElementById("csvSheet"), top = el ? el.scrollTop : 0;
+  render();
+  const e2 = document.getElementById("csvSheet"); if (e2) e2.scrollTop = top;
+}
+function csvMapSet(k, v) { if (!CSV) return; CSV.map[k] = Number(v); CSV.override = {}; csvRender(); }
+function csvOptSet(k, v) { if (!CSV) return; CSV[k] = (k === "invert" || k === "autoCat") ? !!v : v; CSV.override = {}; csvRender(); }
+function csvHeaderRowSet(n) {
+  if (!CSV) return;
+  const i = Math.max(0, Math.min(CSV.rows.length - 2, (Number(n) || 1) - 1));
+  const g = guessCsvMap(CSV.rows[i]); CSV.headerRow = i; CSV.map = g.map; CSV.mode = g.mode; CSV.override = {}; csvRender();
+}
+function csvToggle(i) { if (!CSV) return; const cd = csvCandidates().find(x => x.idx === i); if (!cd || cd.skip) return; CSV.override[i] = !cd.include; csvRender(); }
+function csvCancel() { CSV = null; render(); }
+function csvImportDo() {
+  if (!CSV) return;
+  const chosen = csvCandidates().filter(x => x.include);
+  if (!chosen.length) { CSV.error = "Nothing selected to import."; csvRender(); return; }
+  const acct = resolveAcct(CSV.account);
+  const entries = chosen.map(x => ({ id: uid(), type: x.type, amount: x.amount, category: x.category, date: x.date, note: x.note, account: acct }));
+  if (JSON.stringify(DB).length + JSON.stringify(entries).length > 900000) { CSV.error = "That would make your data too large to sync. Import a shorter date range."; csvRender(); return; }
+  const snap = takeSnap();
+  DB.txns = entries.concat(DB.txns);
+  saveDB(); CSV = null;
+  showToast("Imported " + entries.length + (entries.length === 1 ? " entry" : " entries"), snap);
+  render();
+}
+function viewCsvSheet() {
+  const c = CSV, headers = c.rows[c.headerRow] || [];
+  const col = (i) => headers[i] || "Column " + (i + 1);
+  const colOpts = (sel, optional) => (optional ? `<option value="-1" ${sel < 0 ? "selected" : ""}>\u2014 none \u2014</option>` : `<option value="-1" ${sel < 0 ? "selected" : ""}>Choose a column\u2026</option>`) + headers.map((h, i) => `<option value="${i}" ${sel === i ? "selected" : ""}>${esc(col(i))}</option>`).join("");
+  const sel = (label, key, optional) => `<div style="flex:1;min-width:130px"><label class="fl">${label}</label><select onchange="csvMapSet('${key}', this.value)">${colOpts(c.map[key], optional)}</select></div>`;
+  const cands = csvCandidates();
+  const nNew = cands.filter(x => x.include).length, nDup = cands.filter(x => x.duplicate).length, nSkip = cands.filter(x => x.skip).length;
+  const preview = cands.slice(0, 60).map(x => {
+    const status = x.skip ? `<span style="color:var(--danger)">${esc(x.skip)}</span>` : x.duplicate ? `<span style="color:var(--withdraw)">Looks like one you have</span>` : `<span style="color:var(--saving)">New</span>`;
+    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12px;${x.include ? "" : "opacity:.55"}">
+      <input type="checkbox" ${x.include ? "checked" : ""} ${x.skip ? "disabled" : ""} onchange="csvToggle(${x.idx})" style="flex-shrink:0"/>
+      <span style="flex:1;min-width:0"><span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.note || "(no description)")}</span><span style="display:block;font-size:10.5px;color:var(--ink-faint)">${x.date ? fmtDateFull(x.date) : "?"}${x.skip ? "" : " \u00b7 " + esc(x.category)} \u00b7 ${status}</span></span>
+      <span class="num" style="font-weight:700;flex-shrink:0;color:${x.type === "income" ? "var(--saving)" : x.type === "expense" ? "var(--expense)" : "var(--ink-faint)"}">${x.type ? (x.type === "income" ? "+" : "\u2212") + fmtINR(x.amount) : "\u2014"}</span></div>`;
+  }).join("");
+  const modeOpt = (v, l) => `<option value="${v}" ${c.mode === v ? "selected" : ""}>${l}</option>`;
+  return `<div class="sheet-backdrop" onclick="csvCancel()"><div class="sheet" id="csvSheet" style="max-width:640px" onclick="event.stopPropagation()">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <p style="font-size:16px;font-weight:700;margin:0">Import bank statement</p>
+      <button onclick="csvCancel()" aria-label="Close" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);padding:4px">${icon("close", 18)}</button>
+    </div>
+    <p class="muted" style="margin:0 0 12px">${esc(c.name)} \u00b7 ${c.rows.length - c.headerRow - 1} rows. Check the columns below, then review the preview.</p>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div class="flex-gap" style="flex-wrap:wrap">
+        <div style="width:96px"><label class="fl">Header row</label><input type="number" min="1" value="${c.headerRow + 1}" onchange="csvHeaderRowSet(this.value)"/></div>
+        ${sel("Date column", "date", false)}
+        <div style="flex:1;min-width:130px"><label class="fl">Date format</label><select onchange="csvOptSet('dateFmt', this.value)"><option value="dmy" ${c.dateFmt === "dmy" ? "selected" : ""}>Day / Month / Year</option><option value="mdy" ${c.dateFmt === "mdy" ? "selected" : ""}>Month / Day / Year</option></select></div>
+      </div>
+      <div><label class="fl">How are amounts shown?</label><select onchange="csvOptSet('mode', this.value)">${modeOpt("single", "One amount column (minus = money out)")}${modeOpt("split", "Separate Debit and Credit columns")}${modeOpt("typed", "Amount column + a Type column (income / expense)")}</select></div>
+      <div class="flex-gap" style="flex-wrap:wrap">
+        ${c.mode === "split" ? sel("Debit (money out)", "debit", false) + sel("Credit (money in)", "credit", false) : sel("Amount column", "amount", false)}
+        ${c.mode === "typed" ? sel("Type column", "type", false) : ""}
+      </div>
+      <div class="flex-gap" style="flex-wrap:wrap">${sel("Description column", "desc", true)}${sel("Category column", "category", true)}</div>
+      ${c.mode === "single" ? `<label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" ${c.invert ? "checked" : ""} onchange="csvOptSet('invert', this.checked)"/> Flip signs (credit-card statements show spends as positive)</label>` : ""}
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" ${c.autoCat ? "checked" : ""} onchange="csvOptSet('autoCat', this.checked)"/> Guess categories from the description (Swiggy \u2192 Food, Uber \u2192 Transport\u2026)</label>
+      <div><label class="fl">Import into account</label><select onchange="csvOptSet('account', this.value)">${accountOptions(CSV.account)}</select></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin:14px 0 4px"><p style="font-size:13px;font-weight:700;margin:0">Preview</p><p style="font-size:11.5px;color:var(--ink-soft);margin:0">${nNew} to import \u00b7 ${nDup} possible duplicate${nDup === 1 ? "" : "s"} \u00b7 ${nSkip} skipped</p></div>
+    <div>${preview || `<p class="muted">No rows.</p>`}${cands.length > 60 ? `<p class="muted" style="margin:8px 0 0">Showing the first 60 of ${cands.length} rows. Every selected row is imported.</p>` : ""}</div>
+    <p style="font-size:11px;color:var(--ink-faint);margin:10px 0 0">Possible duplicates have the same date, type and amount as an entry you already have, so they\u2019re left out. Tick one to import it anyway.</p>
+    ${c.error ? `<p style="font-size:12px;color:var(--danger);margin:8px 0 0">${esc(c.error)}</p>` : ""}
+    <div class="flex-gap" style="margin-top:16px"><button class="btn-ghost" style="flex:1" onclick="csvCancel()">Cancel</button><button class="btn-primary" style="flex:1" onclick="csvImportDo()">Import ${nNew} ${nNew === 1 ? "entry" : "entries"}</button></div>
+  </div></div>`;
 }
 
 /* ==================== toast, undo and budget alerts ==================== */
@@ -2272,7 +2598,7 @@ function doLogRecurring(id) {
 // ---- loans (borrowed and lent) ----
 function openLoanForm(dir) { UI.loanFormDir = dir === "lend" ? "lend" : "borrow"; UI.showLoanForm = true; render(); }
 function closeLoanForm() { UI.showLoanForm = false; render(); }
-function setLoanView(v) { UI.loanView = v === "owed" ? "owed" : "owe"; if (UI.tab === "loans") render(); }
+function setLoanView(v) { UI.loanView = v === "owed" ? "owed" : v === "people" ? "people" : "owe"; if (UI.tab === "loans") render(); }
 function onLoanTypeChange() {
   const monthly = document.getElementById("loanType").value === "monthly";
   document.getElementById("loanRateWrap").style.display = monthly ? "block" : "none";
