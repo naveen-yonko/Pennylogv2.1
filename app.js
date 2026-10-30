@@ -15,14 +15,14 @@ const LOCKED_CATS = { expense: ["Other", LOAN_INTEREST_CATEGORY], income: ["Sala
 const CATS_INCOME = ["Salary","Freelance","Bonus","Interest","Gift","Other"];
 const TAX_80C_LIMIT = 150000;
 const GITHUB_REPO = "https://github.com/naveen-yonko/Pennylogv2.1";
-const APP_VERSION = "2.7";
+const APP_VERSION = "3.0";
 const CONTACT_EMAIL = "naveen2992005@gmail.com"; // shown on the About page
 
 const TYPE_META = {
   income:     { label: "Income",     color: "var(--income)",  tint: "var(--income-tint)",  sign: "+" },
   expense:    { label: "Expense",    color: "var(--expense)", tint: "var(--expense-tint)", sign: "\u2212" },
   saving:     { label: "Saving",     color: "var(--saving)",  tint: "var(--saving-tint)",  sign: "+" },
-  transfer:   { label: "Transfer", color: "var(--ink-soft)", tint: "rgba(28,27,25,0.07)", sign: "" },
+  transfer:   { label: "Transfer", color: "var(--ink-soft)", tint: "var(--tint-neutral)", sign: "" },
   borrow:     { label: "Borrowed", color: "var(--loan)", tint: "var(--loan-tint)", sign: "+" },
   repay:      { label: "Loan repaid", color: "var(--loan)", tint: "var(--loan-tint)", sign: "\u2212" },
   lend:       { label: "Lent", color: "var(--loan)", tint: "var(--loan-tint)", sign: "\u2212" },
@@ -38,6 +38,7 @@ const ICONS = {
   goals: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4.2"/><circle cx="12" cy="12" r="0.6" fill="currentColor"/>',
   about: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5"/><circle cx="12" cy="8" r="0.6" fill="currentColor"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  edit: '<path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M14 8l3 3"/>',
   trash: '<path d="M4 6.5h16"/><path d="M8.5 6.5V5a1.5 1.5 0 0 1 1.5-1.5h4A1.5 1.5 0 0 1 15.5 5v1.5"/><path d="M6.5 6.5 7.3 19a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12.5"/><path d="M10.3 10.5v6.2M13.7 10.5v6.2"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
   sprout: '<path d="M12 21v-8"/><path d="M12 13c0-3.5-2.5-5.5-6-5.5.3 3.7 2.5 5.7 6 5.5Z"/><path d="M12 10.5c0-3 2.2-4.8 5.3-4.8-.3 3.2-2.2 5-5.3 4.8Z"/>',
@@ -185,7 +186,7 @@ function loadLocalDB() {
 function saveLocalDB() { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 
 let DB = normalizeDB(loadLocalDB());
-let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, loanFormDir: "borrow", loanView: "owe", catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all", histQ: "", histCat: "", histAcct: "", histFrom: "", histTo: "" };
+let UI = { tab: "home", showForm: false, formType: "expense", editingId: null, recurringOpen: false, goalFormOpen: false, presetFormOpen: false, editingPresetId: null, editingRecId: null, showTransfer: false, editingTransferId: null, showAccounts: false, showLoanForm: false, loanPay: null, loanOpenId: null, loanFormDir: "borrow", loanView: "owe", catTab: "expense", formAccount: null, lastAccount: null, formSource: "income", showWithdraw: false, pwVisible: false, mobileMenuOpen: false, listScope: "month", histFilter: "all", histQ: "", histCat: "", histAcct: "", histFrom: "", histTo: "" };
 let AUTH = { user: null, ready: false, mode: "login", error: "", syncState: "offline" };
 
 const OWNER_KEY = "pennylog-owner";
@@ -193,7 +194,9 @@ let unsubscribeSnap = null;
 // Firestore rejects `undefined` values, so always send a clean copy
 function cloudCopy() { return JSON.parse(JSON.stringify(DB)); }
 
+let SAVES = 0;
 function saveDB() {
+  SAVES++; if (UNDO && SAVES > UNDO.saves) hideToast();
   saveLocalDB();
   if (AUTH.user && window.__fb) {
     try {
@@ -220,7 +223,9 @@ window.onAuthChange = function (user) {
       if (snap.metadata && snap.metadata.hasPendingWrites) return; // that is just our own save echoing back
       if (snap.exists()) {
         const data = snap.data();
-        DB = normalizeDB({ txns: data.txns || [], goals: data.goals || emptyDB().goals, recurring: data.recurring || [] });
+        const next = normalizeDB({ txns: data.txns || [], goals: data.goals || emptyDB().goals, recurring: data.recurring || [] });
+        if (UNDO && JSON.stringify(next) !== JSON.stringify(DB)) hideToast(); // another device changed things: an old undo would overwrite that
+        DB = next;
         saveLocalDB();
       } else {
         window.__fb.setDoc(doc(dbFs, "pennylog", user.uid), cloudCopy());
@@ -397,7 +402,7 @@ function trendChart(months) {
   </svg>`;
 }
 /* ==================== charts ==================== */
-const DONUT_COLORS = ["#A8442D", "#C9A85E", "#1F5C63", "#3D5A8A", "#2F6B45", "#7A5C7E", "#8A5A00", "#6E6A5E"];
+const DONUT_COLORS = ["var(--expense)", "var(--brass-solid)", "var(--income)", "var(--loan)", "var(--saving)", "var(--withdraw)", "var(--ink-soft)", "var(--ink-faint)"];
 function chartMonthsData(n) {
   const ledger = buildLedger(), out = [];
   for (let i = n - 1; i >= 0; i--) {
@@ -506,11 +511,12 @@ function viewHome(stats) {
     <button class="quickbtn" onclick="openForm('saving')"><span class="badge" style="background:var(--saving-tint);color:var(--saving)">${icon('sprout',15)}</span>Saving</button>
     <button class="quickbtn" onclick="openWithdraw()"><span class="badge" style="background:var(--withdraw-tint);color:var(--withdraw)">${icon('download',15)}</span>Withdraw</button>
   </div>`;
+  html += budgetAlertsCard(stats);
 
   if (due.length) {
     html += `<div class="card" style="border-color:var(--brass-tint);background:var(--brass-tint)">${sectionLabel("Due this month","repeat")}`;
     due.forEach(r => {
-      html += `<div class="row" style="border-bottom-color:rgba(28,27,25,0.08);cursor:default">
+      html += `<div class="row" style="border-bottom-color:var(--line-strong);cursor:default">
         <div><p style="font-size:13px;margin:0">${esc(r.category)}</p><p style="font-size:11.5px;color:var(--ink-soft);margin:0">Day ${r.day} \u00b7 ${fmtINR(r.amount)}</p></div>
         <button class="btn-ghost" style="padding:6px 12px;font-size:12px;background:var(--card)" onclick="event.stopPropagation();doLogRecurring('${r.id}')">Log now</button>
       </div>`;
@@ -977,22 +983,25 @@ function viewPresetsCard() {
     const meta = TYPE_META[p.type];
     h += `<div class="row" style="cursor:default"><div><p style="font-size:13px;margin:0">${esc(p.label)}</p><p style="font-size:11.5px;color:var(--ink-soft);margin:0">${esc(meta.label)} \u00b7 ${esc(p.category)}</p></div>
       <div style="display:flex;align-items:center;gap:10px"><span class="num" style="font-weight:700;font-size:13px;color:${meta.color}">${fmtINR(p.amount)}</span>
+      <button onclick="editPreset('${p.id}')" aria-label="Edit preset" style="border:none;background:none;cursor:pointer;padding:3px;color:var(--ink-faint)">${icon('edit',14)}</button>
       <button onclick="deletePreset('${p.id}')" aria-label="Delete preset" style="border:none;background:none;cursor:pointer;padding:3px;color:var(--ink-faint)">${icon('trash',14)}</button></div></div>`;
   });
   if (UI.presetFormOpen) {
+    const ep = UI.editingPresetId ? DB.goals.presets.find(x => x.id === UI.editingPresetId) : null;
+    const ptype = ep ? ep.type : "expense";
     h += `<div style="margin-top:12px;padding-top:12px;${DB.goals.presets.length?'border-top:1px solid var(--line)':''}">
       <div style="display:flex;flex-direction:column;gap:10px">
         <div class="flex-gap">
-          <div style="flex:1"><label class="fl">Name</label><input id="presetLabel" type="text" placeholder="e.g. Tea"/></div>
-          <div style="width:96px"><label class="fl">Amount (\u20B9)</label><input id="presetAmount" type="number" min="0" placeholder="0"/></div>
+          <div style="flex:1"><label class="fl">Name</label><input id="presetLabel" type="text" placeholder="e.g. Tea" value="${ep ? esc(ep.label) : ""}"/></div>
+          <div style="width:96px"><label class="fl">Amount (\u20B9)</label><input id="presetAmount" type="number" min="0" placeholder="0" value="${ep ? ep.amount : ""}"/></div>
         </div>
         <div class="flex-gap">
-          <div style="flex:1"><label class="fl">Type</label><select id="presetType" onchange="refreshPresetCats()"><option value="expense">Expense</option><option value="income">Income</option><option value="saving">Saving</option></select></div>
-          <div style="flex:1"><label class="fl">Category</label><select id="presetCategory">${catsFor("expense").map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("")}</select></div>
+          <div style="flex:1"><label class="fl">Type</label><select id="presetType" onchange="refreshPresetCats()"><option value="expense" ${ptype==="expense"?"selected":""}>Expense</option><option value="income" ${ptype==="income"?"selected":""}>Income</option><option value="saving" ${ptype==="saving"?"selected":""}>Saving</option></select></div>
+          <div style="flex:1"><label class="fl">Category</label><select id="presetCategory">${catsFor(ptype).map(c=>`<option value="${esc(c)}" ${ep && ep.category===c?"selected":""}>${esc(c)}</option>`).join("")}</select></div>
         </div>
         <p id="presetError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
       </div>
-      <div class="flex-gap" style="margin-top:12px"><button class="btn-ghost" style="flex:1" onclick="closePresetForm()">Cancel</button><button class="btn-primary" style="flex:1" onclick="submitPreset()">Add preset</button></div>
+      <div class="flex-gap" style="margin-top:12px"><button class="btn-ghost" style="flex:1" onclick="closePresetForm()">Cancel</button><button class="btn-primary" style="flex:1" onclick="submitPreset()">${ep ? "Save changes" : "Add preset"}</button></div>
     </div>`;
   } else {
     h += `<button class="btn-ghost" style="width:100%;margin-top:${DB.goals.presets.length?'12px':'0'};display:flex;align-items:center;justify-content:center;gap:6px" onclick="openPresetForm()">${icon('plus',14)} Add a preset</button>`;
@@ -1001,8 +1010,8 @@ function viewPresetsCard() {
 }
 
 function viewRecurring(thisMonth) {
-  let html = `<div class="card">${sectionLabel("Recurring bills & SIPs","repeat")}`;
-  if (!DB.recurring.length && !UI.recurringOpen) html += `<p class="muted" style="margin:0 0 12px">Add rent, subscriptions, or monthly SIPs so they show up as "due" automatically each month.</p>`;
+  let html = `<div class="card">${sectionLabel("Recurring bills, SIPs & income","repeat")}`;
+  if (!DB.recurring.length && !UI.recurringOpen) html += `<p class="muted" style="margin:0 0 12px">Add rent, subscriptions, monthly SIPs or your salary so they show up as "due" each month.</p>`;
   DB.recurring.forEach(r => {
     const logged = r.lastLoggedMonth === thisMonth;
     const meta = TYPE_META[r.type];
@@ -1010,35 +1019,38 @@ function viewRecurring(thisMonth) {
       <div><p style="font-size:13px;margin:0">${esc(r.category)}</p><p style="font-size:11.5px;color:var(--ink-soft);margin:0">Day ${r.day} of every month \u00b7 <span class="num" style="font-weight:700;color:${meta.color}">${fmtINR(r.amount)}</span></p></div>
       <div style="display:flex;align-items:center;gap:10px">
         <span class="pill" style="background:${logged?'var(--saving-tint)':'var(--brass-tint)'};color:${logged?'var(--saving)':'var(--brass)'}">${logged?"Logged":"Pending"}</span>
+        <button onclick="editRecurring('${r.id}')" aria-label="Edit" style="border:none;background:none;cursor:pointer;padding:3px;color:var(--ink-faint)">${icon('edit',14)}</button>
         <button onclick="doDeleteRecurring('${r.id}')" aria-label="Delete" style="border:none;background:none;cursor:pointer;padding:3px;color:var(--ink-faint)">${icon('trash',14)}</button>
       </div>
     </div>`;
   });
 
   if (UI.recurringOpen) {
+    const er = UI.editingRecId ? DB.recurring.find(x => x.id === UI.editingRecId) : null;
     html += `<div style="margin-top:${DB.recurring.length?'12px':'0'};padding-top:${DB.recurring.length?'12px':'0'};${DB.recurring.length?'border-top:1px solid var(--line)':''}">
       <div class="flex-gap" style="margin-bottom:10px">
         <button class="tabbtn ${UI.recFormType==='expense'?'on':''}" style="${UI.recFormType==='expense'?'background:var(--expense-tint);color:var(--expense)':''}" onclick="setRecFormType('expense')">Expense</button>
+        <button class="tabbtn ${UI.recFormType==='income'?'on':''}" style="${UI.recFormType==='income'?'background:var(--income-tint);color:var(--income)':''}" onclick="setRecFormType('income')">Income</button>
         <button class="tabbtn ${UI.recFormType==='saving'?'on':''}" style="${UI.recFormType==='saving'?'background:var(--saving-tint);color:var(--saving)':''}" onclick="setRecFormType('saving')">Saving</button>
       </div>
       <div style="display:flex;flex-direction:column;gap:10px">
         <div class="flex-gap">
-          <div style="flex:1"><label class="fl">Amount (\u20B9)</label><input id="recAmount" type="number" min="0" step="100" placeholder="0"/></div>
-          <div style="width:84px"><label class="fl">Day</label><input id="recDay" type="number" min="1" max="31" value="1"/></div>
+          <div style="flex:1"><label class="fl">Amount (\u20B9)</label><input id="recAmount" type="number" min="0" step="100" placeholder="0" value="${er ? er.amount : ""}"/></div>
+          <div style="width:84px"><label class="fl">Day</label><input id="recDay" type="number" min="1" max="31" value="${er ? er.day : 1}"/></div>
         </div>
-        <div><label class="fl">Category</label><select id="recCategory">${catsFor(UI.recFormType||'expense').map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("")}</select></div>
+        <div><label class="fl">Category</label><select id="recCategory">${catsFor(UI.recFormType||'expense').map(c=>`<option value="${esc(c)}" ${er && er.category===c?"selected":""}>${esc(c)}</option>`).join("")}</select></div>
         ${UI.recFormType === "saving" ? `<div><label class="fl">Where does this come from?</label>
           <div class="flex-gap">
             <button type="button" class="srcbtn ${UI.recSource!=='external'?'on-income':''}" onclick="setRecSource('income')">From cash in hand</button>
             <button type="button" class="srcbtn ${UI.recSource==='external'?'on-external':''}" onclick="setRecSource('external')">Outside income</button>
           </div></div>` : ""}
-        ${(UI.recFormType !== "saving" || UI.recSource !== "external") ? `<div><label class="fl">Paid from</label><select id="recAccount">${accountOptions(DB.goals.defaultAccount)}</select></div>` : ""}
-        <div><label class="fl">Note (optional)</label><input id="recNote" type="text" placeholder="e.g. house rent, Nifty 50 SIP"/></div>
+        ${(UI.recFormType !== "saving" || UI.recSource !== "external") ? `<div><label class="fl">${UI.recFormType === "income" ? "Goes into" : "Paid from"}</label><select id="recAccount">${accountOptions(er && er.account ? er.account : DB.goals.defaultAccount)}</select></div>` : ""}
+        <div><label class="fl">Note (optional)</label><input id="recNote" type="text" placeholder="e.g. house rent, Nifty 50 SIP, monthly salary" value="${er ? esc(er.note || "") : ""}"/></div>
         <p id="recError" style="font-size:12px;color:var(--danger);margin:0;display:none"></p>
       </div>
       <div class="flex-gap" style="margin-top:12px">
         <button class="btn-ghost" style="flex:1" onclick="closeRecurringForm()">Cancel</button>
-        <button class="btn-primary" style="flex:1" onclick="submitRecurring()">Add recurring</button>
+        <button class="btn-primary" style="flex:1" onclick="submitRecurring()">${er ? "Save changes" : "Add recurring"}</button>
       </div>
     </div>`;
   } else {
@@ -1069,6 +1081,7 @@ function viewAbout() {
         <span class="chev">${icon('chevron',14)}</span>
       </a>
     </div>
+    ${viewAppearanceCard()}
     ${AUTH.user ? viewSecurityCard() : ""}
     ${AUTH.user ? `<div class="card">
       ${sectionLabel("Account & device","user")}
@@ -1711,9 +1724,86 @@ function doSignOut() {
   if (unsubscribeSnap) { unsubscribeSnap(); unsubscribeSnap = null; }
   // leave nothing behind on a shared device
   DB = normalizeDB(emptyDB());
-  localStorage.removeItem(STORE_KEY); localStorage.removeItem(OWNER_KEY); clearPinData();
+  localStorage.removeItem(STORE_KEY); localStorage.removeItem(OWNER_KEY); clearPinData(); hideToast();
   UI.tab = "home"; UI.showForm = false; UI.showWithdraw = false; UI.showTransfer = false; UI.showAccounts = false; UI.showLoanForm = false; UI.loanPay = null; UI.mobileMenuOpen = false;
   window.__fb.signOut(window.__fb.auth);
+}
+
+/* ==================== toast, undo and budget alerts ==================== */
+let UNDO = null, toastTimer = null;
+function takeSnap() { return JSON.stringify({ txns: DB.txns, goals: DB.goals, recurring: DB.recurring }); }
+function hideToast() {
+  clearTimeout(toastTimer); UNDO = null;
+  const el = document.getElementById("toast");
+  if (el) { el.className = "toast"; el.innerHTML = ""; }
+}
+// snap = state from before the change; passing it adds an Undo button (valid until the next save or ~8 seconds)
+function showToast(msg, snap) {
+  clearTimeout(toastTimer);
+  UNDO = snap ? { snap, saves: SAVES } : null;
+  const el = document.getElementById("toast");
+  if (el) {
+    el.innerHTML = `<span>${esc(msg)}</span>${snap ? `<button onclick="doUndo()">Undo</button>` : ""}`;
+    el.className = "toast show";
+  }
+  toastTimer = setTimeout(hideToast, snap ? 8000 : 5000);
+}
+function doUndo() {
+  if (!UNDO) return;
+  const snap = UNDO.snap; hideToast();
+  DB = normalizeDB(JSON.parse(snap));
+  saveDB(); render();
+}
+function budgetPct(cat) {
+  const b = Number((DB.goals.monthlyBudgets || {})[cat]) || 0;
+  if (b <= 0) return null;
+  return ((computeStats().byCat[cat] || 0) / b) * 100;
+}
+function budgetStatus(stats) {
+  const budgets = DB.goals.monthlyBudgets || {}, out = [];
+  Object.keys(budgets).forEach(cat => {
+    const budget = Number(budgets[cat]) || 0;
+    if (budget <= 0) return;
+    const spent = stats.byCat[cat] || 0, pct = (spent / budget) * 100;
+    if (pct >= 80) out.push({ cat, spent, budget, pct, over: pct >= 100 });
+  });
+  return out.sort((a, b) => b.pct - a.pct);
+}
+function budgetAlertsCard(stats) {
+  const items = budgetStatus(stats);
+  if (!items.length) return "";
+  const rows = items.map(i => `<div style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:5px">
+        <span style="font-size:13px;font-weight:600">${esc(i.cat)}</span>
+        <span style="font-size:12px;color:${i.over ? "var(--danger)" : "var(--withdraw)"};font-weight:700">${i.over ? fmtINR(round2(i.spent - i.budget)) + " over" : Math.round(i.pct) + "% used"}</span>
+      </div>
+      <div class="track"><div class="fill" style="width:${Math.min(100, i.pct)}%;background:${i.over ? "var(--danger)" : "var(--withdraw)"}"></div></div>
+      <p style="font-size:11px;color:var(--ink-faint);margin:4px 0 0">${fmtINR(i.spent)} of ${fmtINR(i.budget)} this month</p>
+    </div>`).join("");
+  return `<div class="card">${sectionLabel("Budget alerts")}${rows}<button class="btn-ghost" style="width:100%;padding:9px;font-size:12.5px" onclick="setTab('goals')">Edit budgets</button></div>`;
+}
+
+/* ==================== appearance (light / dark, this device only) ==================== */
+const THEME_KEY = "pennylog-theme";
+function themeMode() { try { const m = localStorage.getItem(THEME_KEY); return m === "light" || m === "dark" ? m : "auto"; } catch (e) { return "auto"; } }
+function systemPrefersDark() { return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches); }
+function effectiveTheme() { const m = themeMode(); return m === "auto" ? (systemPrefersDark() ? "dark" : "light") : m; }
+function applyTheme() {
+  const th = effectiveTheme();
+  const el = document.documentElement;
+  if (el && el.setAttribute) el.setAttribute("data-theme", th);
+  const meta = document.querySelector && document.querySelector('meta[name="theme-color"]');
+  if (meta && meta.setAttribute) meta.setAttribute("content", th === "dark" ? "#26241F" : "#1C1B19");
+}
+function setTheme(mode) { try { localStorage.setItem(THEME_KEY, mode); } catch (e) { /* ignore */ } applyTheme(); render(); }
+if (window.matchMedia) { try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (themeMode() === "auto") applyTheme(); }); } catch (e) { /* older browsers */ } }
+function viewAppearanceCard() {
+  const m = themeMode();
+  const chip = (k, l) => `<button class="chip ${m === k ? "on" : ""}" style="flex:1;margin:0" onclick="setTheme('${k}')">${l}</button>`;
+  return `<div class="card">${sectionLabel("Appearance")}
+    <div class="chips" style="margin-bottom:8px;flex-wrap:nowrap">${chip("auto", "Auto")}${chip("light", "Light")}${chip("dark", "Dark")}</div>
+    <p style="font-size:11px;color:var(--ink-faint);margin:0">Auto follows your phone or computer setting. This choice applies to this device only.</p>
+  </div>`;
 }
 
 /* ==================== PIN lock (this device only) ==================== */
@@ -1934,12 +2024,18 @@ function submitSheet() {
     }
     UI.lastAccount = entry.account;
   }
+  const pctBefore = entry.type === "expense" ? budgetPct(category) : null;
   if (UI.editingId) updateTxn(UI.editingId, entry);
   else addTxn(entry);
   UI.showForm = false; UI.editingId = null;
   render();
+  if (pctBefore !== null) {
+    const pctAfter = budgetPct(category);
+    if (pctAfter >= 100 && pctBefore < 100) showToast(category + " is over its monthly budget.");
+    else if (pctAfter >= 80 && pctBefore < 80) showToast(category + " has used " + Math.round(pctAfter) + "% of its monthly budget.");
+  }
 }
-function doDeleteTxn() { if (!confirm("Delete this entry? This can't be undone.")) return; if (UI.editingId) deleteTxn(UI.editingId); UI.showForm=false; UI.editingId=null; render(); }
+function doDeleteTxn() { if (UI.editingId) { const snap = takeSnap(); deleteTxn(UI.editingId); showToast("Entry deleted", snap); } UI.showForm=false; UI.editingId=null; render(); }
 
 // ---- transfers ----
 function openTransfer(id) {
@@ -1968,8 +2064,7 @@ function submitTransfer() {
   UI.showTransfer = false; UI.editingTransferId = null; render();
 }
 function deleteTransfer() {
-  if (!confirm("Delete this transfer?")) return;
-  if (UI.editingTransferId) deleteTxn(UI.editingTransferId);
+  if (UI.editingTransferId) { const snap = takeSnap(); deleteTxn(UI.editingTransferId); showToast("Transfer deleted", snap); }
   UI.showTransfer = false; UI.editingTransferId = null; render();
 }
 
@@ -2011,6 +2106,7 @@ function deleteAccount(id) {
   const others = accts.filter(x => x.id !== id);
   const target = id === DB.goals.defaultAccount ? others[0] : acctById(DB.goals.defaultAccount);
   if (!confirm(`Delete "${a.name}"? Its entries and balance move to "${target.name}".`)) return;
+  const snap = takeSnap();
   target.opening = (target.opening || 0) + (a.opening || 0);
   DB.txns.forEach(t => { if (t.account === id) t.account = target.id; if (t.from === id) t.from = target.id; if (t.to === id) t.to = target.id; });
   DB.txns = DB.txns.filter(t => !(t.type === "transfer" && resolveAcct(t.from) === resolveAcct(t.to)));
@@ -2018,7 +2114,7 @@ function deleteAccount(id) {
   DB.goals.accounts = others;
   if (DB.goals.defaultAccount === id) DB.goals.defaultAccount = target.id;
   if (UI.lastAccount === id) UI.lastAccount = null;
-  saveDB(); render();
+  saveDB(); showToast("Account deleted", snap); render();
 }
 
 // ---- custom categories ----
@@ -2054,17 +2150,19 @@ function deleteCategory(type, idx) {
   if (name === undefined || LOCKED_CATS[type].includes(name)) return;
   const n = DB.txns.filter(t => t.type === type && t.category === name).length;
   if (!confirm(n ? `Delete "${name}"? Its ${n} entr${n === 1 ? "y" : "ies"} will move to "Other".` : `Delete "${name}"?`)) return;
+  const snap = takeSnap();
   DB.txns.forEach(t => { if (t.type === type && t.category === name) t.category = "Other"; });
   DB.recurring.forEach(r => { if (r.type === type && r.category === name) r.category = "Other"; });
   DB.goals.presets.forEach(p => { if (p.type === type && p.category === name) p.category = "Other"; });
   if (type === "expense" && DB.goals.monthlyBudgets) delete DB.goals.monthlyBudgets[name];
   list.splice(idx, 1);
-  saveDB(); render();
+  saveDB(); showToast("Category deleted", snap); render();
 }
 
 // ---- quick presets ----
-function openPresetForm() { UI.presetFormOpen = true; render(); }
-function closePresetForm() { UI.presetFormOpen = false; render(); }
+function openPresetForm() { UI.presetFormOpen = true; UI.editingPresetId = null; render(); }
+function editPreset(id) { if (!DB.goals.presets.some(p => p.id === id)) return; UI.presetFormOpen = true; UI.editingPresetId = id; render(); }
+function closePresetForm() { UI.presetFormOpen = false; UI.editingPresetId = null; render(); }
 function refreshPresetCats() {
   const type = document.getElementById("presetType").value;
   document.getElementById("presetCategory").innerHTML = catsFor(type).map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
@@ -2077,10 +2175,12 @@ function submitPreset() {
   const err = document.getElementById("presetError");
   if (!label) { err.textContent = "Give the preset a name."; err.style.display = "block"; return; }
   if (!amount || amount <= 0) { err.textContent = "Enter an amount greater than 0."; err.style.display = "block"; return; }
-  DB.goals.presets.push({ id: uid(), label, amount, type, category });
-  UI.presetFormOpen = false; saveDB(); render();
+  const existing = UI.editingPresetId ? DB.goals.presets.find(p => p.id === UI.editingPresetId) : null;
+  if (existing) Object.assign(existing, { label, amount, type, category });
+  else DB.goals.presets.push({ id: uid(), label, amount, type, category });
+  UI.presetFormOpen = false; UI.editingPresetId = null; saveDB(); render();
 }
-function deletePreset(id) { DB.goals.presets = DB.goals.presets.filter(p => p.id !== id); saveDB(); render(); }
+function deletePreset(id) { DB.goals.presets = DB.goals.presets.filter(p => p.id !== id); if (UI.editingPresetId === id) { UI.editingPresetId = null; UI.presetFormOpen = false; } saveDB(); render(); }
 
 function openWithdraw() { UI.showWithdraw = true; render(); }
 function closeWithdraw() { UI.showWithdraw = false; render(); }
@@ -2155,9 +2255,9 @@ function renameGoal(id, value) {
   saveDB(); render();
 }
 function deleteGoal(id) {
-  if (!confirm("Remove this goal? Your past savings entries stay in your history.")) return;
+  const snap = takeSnap();
   DB.goals.custom = DB.goals.custom.filter(x => x.id !== id);
-  saveDB(); render();
+  saveDB(); showToast("Goal removed", snap); render();
 }
 
 function doLogRecurring(id) {
@@ -2251,23 +2351,25 @@ function submitLoanPay() {
 function toggleLoanActivity(id) { UI.loanOpenId = UI.loanOpenId === id ? null : id; render(); }
 function undoLoanTxn(id) {
   const t = DB.txns.find(x => x.id === id); if (!t) return;
-  if (!confirm("Remove this entry? Your balances will update.")) return;
+  const snap = takeSnap();
   DB.txns = DB.txns.filter(x => x.id !== id);
   const loan = loanById(t.loanId); if (loan) refreshLoanStatus(loan);
-  saveDB(); render();
+  saveDB(); showToast("Entry removed", snap); render();
 }
 function deleteLoan(id) {
   const loan = loanById(id); if (!loan) return;
   if (!confirm(`Delete the loan ${isLend(loan) ? "to" : "from"} ${loan.lender}? Its entries are removed too, so your balances will change.`)) return;
+  const snap = takeSnap();
   DB.goals.loans = DB.goals.loans.filter(l => l.id !== id);
   DB.txns = DB.txns.filter(t => t.loanId !== id);
   if (UI.loanOpenId === id) UI.loanOpenId = null;
-  saveDB(); render();
+  saveDB(); showToast("Loan deleted", snap); render();
 }
 function setAccountCredit(id, checked) { const a = acctById(id); if (a) { a.credit = !!checked; saveDB(); render(); } }
-function doDeleteRecurring(id) { if (!confirm("Remove this recurring item?")) return; deleteRecurring(id); render(); }
-function openRecurringForm() { UI.recurringOpen = true; UI.recFormType = "expense"; UI.recSource = "income"; render(); }
-function closeRecurringForm() { UI.recurringOpen = false; render(); }
+function doDeleteRecurring(id) { if (UI.editingRecId === id) { UI.editingRecId = null; UI.recurringOpen = false; } const snap = takeSnap(); deleteRecurring(id); showToast("Recurring item removed", snap); render(); }
+function openRecurringForm() { UI.recurringOpen = true; UI.editingRecId = null; UI.recFormType = "expense"; UI.recSource = "income"; render(); }
+function editRecurring(id) { const r = DB.recurring.find(x => x.id === id); if (!r) return; UI.recurringOpen = true; UI.editingRecId = id; UI.recFormType = r.type; UI.recSource = r.source || "income"; render(); }
+function closeRecurringForm() { UI.recurringOpen = false; UI.editingRecId = null; render(); }
 function setRecFormType(t) { UI.recFormType = t; render(); }
 function setRecSource(s) { UI.recSource = s; render(); }
 function submitRecurring() {
@@ -2281,8 +2383,12 @@ function submitRecurring() {
   const entry = { type: UI.recFormType||"expense", amount, category, day, note };
   if (entry.type === "saving") entry.source = UI.recSource || "income";
   const ra = document.getElementById("recAccount"); if (ra) entry.account = ra.value;
-  addRecurring(entry);
-  UI.recurringOpen = false;
+  const existing = UI.editingRecId ? DB.recurring.find(r => r.id === UI.editingRecId) : null;
+  if (existing) {
+    ["source", "account"].forEach(k => { delete existing[k]; }); // drop fields the new type may not use
+    Object.assign(existing, entry); saveDB();
+  } else addRecurring(entry);
+  UI.recurringOpen = false; UI.editingRecId = null;
   render();
 }
 
@@ -2366,6 +2472,7 @@ function clearAllData() {
 }
 
 /* ==================== init ==================== */
+applyTheme();
 if (window.addEventListener) window.addEventListener("afterprint", () => { const a = document.getElementById("printArea"); if (a) a.innerHTML = ""; });
 render();
 if ("serviceWorker" in navigator) {
